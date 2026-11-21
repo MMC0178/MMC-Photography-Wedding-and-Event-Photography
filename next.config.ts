@@ -1,0 +1,49 @@
+import type {NextConfig} from 'next';
+import {PHASE_DEVELOPMENT_SERVER} from 'next/constants';
+
+export default function nextConfig(phase: string): NextConfig {
+  return {
+    distDir: phase === PHASE_DEVELOPMENT_SERVER ? '.next-dev' : '.next',
+    reactStrictMode: true,
+    eslint: {
+      ignoreDuringBuilds: true,
+    },
+    typescript: {
+      ignoreBuildErrors: false,
+    },
+    allowedDevOrigins: [
+      'ais-dev-oemip4j2q3y7lr2kfnvkhd-245135975116.europe-west2.run.app',
+      'ais-pre-oemip4j2q3y7lr2kfnvkhd-245135975116.europe-west2.run.app',
+      '**.run.app',
+    ],
+    // Allow access to remote image placeholder.
+    images: {
+      remotePatterns: [
+        {
+          protocol: 'https',
+          hostname: 'picsum.photos',
+          port: '',
+          pathname: '/**',
+        },
+        {
+          protocol: 'https',
+          hostname: 'images.unsplash.com',
+          port: '',
+          pathname: '/**',
+        },
+      ],
+    },
+    output: 'standalone',
+    transpilePackages: ['motion'],
+    webpack: (config, {dev}) => {
+      // HMR is disabled in AI Studio via DISABLE_HMR env var.
+      // Do not modify—file watching is disabled to prevent flickering during agent edits.
+      if (dev && process.env.DISABLE_HMR === 'true') {
+        config.watchOptions = {
+          ignored: /.*/,
+        };
+      }
+      return config;
+    },
+  };
+}

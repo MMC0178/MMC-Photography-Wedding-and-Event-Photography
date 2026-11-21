@@ -1,0 +1,8 @@
+{
+  "name": "MMC Photography | Wedding & Event Photography",
+  "description": "Capturing life's most precious moments with relaxed, natural wedding photography. Browse our wedding galleries, investment pricing, and private guest photo vault.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
