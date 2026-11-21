@@ -3,6 +3,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import { GalleryPhoto, INITIAL_GALLERY_PHOTOS } from './wedding-data';
 import { idbGet, idbSet } from './studio-storage';
+import {
+  subscribeGalleryPhotosCloud,
+  syncGalleryPhotosToCloud,
+} from './studio-cloud-sync';
 
 const STORAGE_KEY = 'mmc_gallery_photos_v3';
 const CHANGE_EVENT = 'mmc_gallery_photos_updated';
@@ -36,23 +40,28 @@ export function getStoredGalleryPhotos(): GalleryPhoto[] {
   return readLocalGalleryPhotos();
 }
 
-export function saveGalleryPhotos(photos: GalleryPhoto[]): void {
-  hasMutated = true;
+function persistLocally(photos: GalleryPhoto[], markMutated = true): void {
+  if (markMutated) {
+    hasMutated = true;
+  }
   cachedPhotos = photos;
   if (typeof window === 'undefined') return;
 
-  // Dispatch immediately so all subscribers update synchronously even if localStorage quota is exceeded
   window.dispatchEvent(new Event(CHANGE_EVENT));
-
-  // Persist durably in IndexedDB (supports large volumes of uploaded photos)
   void idbSet(STORAGE_KEY, photos);
 
-  // Best-effort mirror to localStorage
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(photos));
   } catch {
-    // Ignore localStorage quota errors; IndexedDB retains the full collection
+    // Ignore localStorage quota errors; IndexedDB & Firestore retain the full collection
   }
+}
+
+export function saveGalleryPhotos(photos: GalleryPhoto[]): void {
+  persistLocally(photos, true);
+  void syncGalleryPhotosToCloud(photos).catch(err => {
+    console.error('Failed to sync gallery photos to cloud:', err);
+  });
 }
 
 export function addGalleryPhoto(photoData: Omit<GalleryPhoto, 'id'>): GalleryPhoto {
@@ -86,10 +95,10 @@ export function useGalleryPhotos() {
 
   useEffect(() => {
     let active = true;
+    let receivedCloudData = false;
 
-    // Authoritative async hydration from IndexedDB (with localStorage migration/fallback)
     void idbGet<GalleryPhoto[]>(STORAGE_KEY).then(stored => {
-      if (!active || hasMutated) return;
+      if (!active || hasMutated || receivedCloudData) return;
       if (Array.isArray(stored) && stored.length > 0) {
         cachedPhotos = stored;
         setPhotos(stored);
@@ -103,6 +112,13 @@ export function useGalleryPhotos() {
       }
     });
 
+    const unsubCloud = subscribeGalleryPhotosCloud(cloudPhotos => {
+      if (!active) return;
+      receivedCloudData = true;
+      persistLocally(cloudPhotos, false);
+      setPhotos(cloudPhotos);
+    });
+
     const handleUpdate = () => {
       refresh();
     };
@@ -112,6 +128,7 @@ export function useGalleryPhotos() {
 
     return () => {
       active = false;
+      unsubCloud();
       window.removeEventListener(CHANGE_EVENT, handleUpdate);
       window.removeEventListener('storage', handleUpdate);
     };

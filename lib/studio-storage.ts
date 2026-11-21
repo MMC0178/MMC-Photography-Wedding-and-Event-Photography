@@ -74,13 +74,14 @@ export async function idbSet<T>(key: string, value: T): Promise<boolean> {
 
 /**
  * Reads a user-uploaded image file and optimizes/resizes large photographs
- * (e.g. 5MB+ phone/DSLR shots) to high-quality JPEGs (max 1600px) so they
- * render smoothly and store reliably across browser sessions.
+ * (e.g. 5MB+ phone/DSLR shots) to crisp JPEGs sized safely for fast page loads
+ * and Cloud Firestore storage.
  */
 export function optimizeUploadedImage(
   file: File,
-  maxDimension = 1600,
-  quality = 0.85
+  maxDimension = 1280,
+  quality = 0.8,
+  maxChars = 380000
 ): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -105,49 +106,60 @@ export function optimizeUploadedImage(
             return;
           }
 
-          // Keep already small images crisp without unnecessary re-encoding
-          const isSmallFile = file.size <= 300 * 1024 && Math.max(width, height) <= maxDimension;
-          if (isSmallFile) {
+          if (dataUrl.length <= maxChars && Math.max(width, height) <= maxDimension) {
             resolve(dataUrl);
             return;
           }
 
-          let targetWidth = width;
-          let targetHeight = height;
+          const renderAt = (dim: number, q: number): string => {
+            let targetWidth = width;
+            let targetHeight = height;
 
-          if (width > maxDimension || height > maxDimension) {
-            if (width >= height) {
-              targetWidth = maxDimension;
-              targetHeight = Math.round((height / width) * maxDimension);
-            } else {
-              targetHeight = maxDimension;
-              targetWidth = Math.round((width / height) * maxDimension);
+            if (width > dim || height > dim) {
+              if (width >= height) {
+                targetWidth = dim;
+                targetHeight = Math.round((height / width) * dim);
+              } else {
+                targetHeight = dim;
+                targetWidth = Math.round((width / height) * dim);
+              }
+            }
+
+            const canvas = document.createElement('canvas');
+            canvas.width = targetWidth;
+            canvas.height = targetHeight;
+
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return dataUrl;
+
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, targetWidth, targetHeight);
+            ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+            return canvas.toDataURL('image/jpeg', q) || dataUrl;
+          };
+
+          const attempts: Array<[number, number]> = [
+            [maxDimension, quality],
+            [Math.min(maxDimension, 1080), 0.72],
+            [Math.min(maxDimension, 900), 0.65],
+            [720, 0.58],
+          ];
+
+          let result = dataUrl;
+          for (const [dim, q] of attempts) {
+            result = renderAt(dim, q);
+            if (result.length <= maxChars) {
+              break;
             }
           }
 
-          const canvas = document.createElement('canvas');
-          canvas.width = targetWidth;
-          canvas.height = targetHeight;
-
-          const ctx = canvas.getContext('2d');
-          if (!ctx) {
-            resolve(dataUrl);
-            return;
-          }
-
-          ctx.fillStyle = '#ffffff';
-          ctx.fillRect(0, 0, targetWidth, targetHeight);
-          ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
-
-          const optimizedUrl = canvas.toDataURL('image/jpeg', quality);
-          resolve(optimizedUrl || dataUrl);
+          resolve(result);
         } catch {
           resolve(dataUrl);
         }
       };
 
       img.onerror = () => {
-        // Fallback to original data URL if browser image decoder skips a format
         resolve(dataUrl);
       };
 

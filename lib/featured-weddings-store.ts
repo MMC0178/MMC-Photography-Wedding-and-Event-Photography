@@ -3,6 +3,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { FeaturedWedding, FeaturedWeddingPhoto, INITIAL_FEATURED_WEDDINGS } from './wedding-data';
 import { idbGet, idbSet } from './studio-storage';
+import {
+  subscribeFeaturedWeddingsCloud,
+  syncFeaturedWeddingsToCloud,
+  syncFeaturedWeddingsToCloudDebounced,
+} from './studio-cloud-sync';
 
 const STORAGE_KEY = 'mmc_featured_weddings_v3';
 const CHANGE_EVENT = 'mmc_featured_weddings_updated';
@@ -37,11 +42,13 @@ export function getStoredFeaturedWeddings(): FeaturedWedding[] {
   return readLocalFeaturedWeddings();
 }
 
-export function saveFeaturedWeddings(weddings: FeaturedWedding[]): void {
-  hasMutated = true;
+function persistLocally(weddings: FeaturedWedding[], markMutated = true): FeaturedWedding[] {
+  if (markMutated) {
+    hasMutated = true;
+  }
   const sliced = weddings.slice(0, 3);
   cachedWeddings = sliced;
-  if (typeof window === 'undefined') return;
+  if (typeof window === 'undefined') return sliced;
 
   window.dispatchEvent(new Event(CHANGE_EVENT));
   void idbSet(STORAGE_KEY, sliced);
@@ -49,7 +56,19 @@ export function saveFeaturedWeddings(weddings: FeaturedWedding[]): void {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(sliced));
   } catch {
-    // Ignore localStorage quota errors; IndexedDB retains the full dataset
+    // Ignore localStorage quota errors; IndexedDB & Firestore retain the full dataset
+  }
+  return sliced;
+}
+
+export function saveFeaturedWeddings(weddings: FeaturedWedding[], immediate = true): void {
+  const sliced = persistLocally(weddings, true);
+  if (immediate) {
+    void syncFeaturedWeddingsToCloud(sliced).catch(err => {
+      console.error('Failed to sync featured weddings to cloud:', err);
+    });
+  } else {
+    syncFeaturedWeddingsToCloudDebounced(sliced);
   }
 }
 
@@ -58,7 +77,8 @@ export function updateFeaturedWedding(id: string, updates: Partial<FeaturedWeddi
   const index = current.findIndex(w => w.id === id);
   if (index === -1) return false;
   const next = current.map((w, i) => (i === index ? { ...w, ...updates } : w));
-  saveFeaturedWeddings(next);
+  const isImageChange = typeof updates.coverImage === 'string';
+  saveFeaturedWeddings(next, isImageChange);
   return true;
 }
 
@@ -74,7 +94,7 @@ export function addPhotoToFeaturedWedding(weddingId: string, photo: { url: strin
   const next = current.map((w, i) =>
     i === index ? { ...w, photos: [newPhoto, ...w.photos] } : w
   );
-  saveFeaturedWeddings(next);
+  saveFeaturedWeddings(next, true);
   return true;
 }
 
@@ -85,12 +105,12 @@ export function removePhotoFromFeaturedWedding(weddingId: string, photoId: strin
   const next = current.map((w, i) =>
     i === index ? { ...w, photos: w.photos.filter(p => p.id !== photoId) } : w
   );
-  saveFeaturedWeddings(next);
+  saveFeaturedWeddings(next, true);
   return true;
 }
 
 export function resetFeaturedWeddingsToDefaults(): void {
-  saveFeaturedWeddings(INITIAL_FEATURED_WEDDINGS);
+  saveFeaturedWeddings(INITIAL_FEATURED_WEDDINGS, true);
 }
 
 export function useFeaturedWeddings() {
@@ -102,9 +122,10 @@ export function useFeaturedWeddings() {
 
   useEffect(() => {
     let active = true;
+    let receivedCloudData = false;
 
     void idbGet<FeaturedWedding[]>(STORAGE_KEY).then(stored => {
-      if (!active || hasMutated) return;
+      if (!active || hasMutated || receivedCloudData) return;
       if (Array.isArray(stored) && stored.length > 0) {
         const sliced = stored.slice(0, 3);
         cachedWeddings = sliced;
@@ -119,6 +140,13 @@ export function useFeaturedWeddings() {
       }
     });
 
+    const unsubCloud = subscribeFeaturedWeddingsCloud(cloudWeddings => {
+      if (!active) return;
+      receivedCloudData = true;
+      persistLocally(cloudWeddings, false);
+      setFeaturedWeddings(cloudWeddings);
+    });
+
     const handleUpdate = () => {
       refresh();
     };
@@ -128,6 +156,7 @@ export function useFeaturedWeddings() {
 
     return () => {
       active = false;
+      unsubCloud();
       window.removeEventListener(CHANGE_EVENT, handleUpdate);
       window.removeEventListener('storage', handleUpdate);
     };

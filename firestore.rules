@@ -1,0 +1,347 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Reusable Hardened Primitives ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isBootstrappedAdmin() {
+      return isVerified() && (
+        request.auth.token.email == 'accomplishmarketinglearning@gmail.com' ||
+        request.auth.token.email == 'michael@mmcphotography.co.uk'
+      );
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || (
+        isVerified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidString(val, maxLen) {
+      return val is string && val.size() <= maxLen;
+    }
+
+    function isNonEmptyString(val, maxLen) {
+      return val is string && val.size() >= 1 && val.size() <= maxLen;
+    }
+
+    // --- Validation Blueprints ---
+    function isValidAboutConfig(data) {
+      return data.keys().hasAll([
+          'homepageHeroImage', 'homepageTitle', 'homepageText', 'homepageImage',
+          'heroKicker', 'heroHeadline', 'heroQuote', 'storyImage', 'storyTitle',
+          'storyParagraphs', 'coreValues', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'homepageHeroImage', 'homepageTitle', 'homepageText', 'homepageImage',
+          'heroKicker', 'heroHeadline', 'heroQuote', 'storyImage', 'storyTitle',
+          'storyParagraphs', 'coreValues', 'updatedAt'
+        ]) &&
+        isNonEmptyString(data.homepageHeroImage, 450000) &&
+        isValidString(data.homepageTitle, 200) &&
+        isValidString(data.homepageText, 4000) &&
+        isNonEmptyString(data.homepageImage, 450000) &&
+        isValidString(data.heroKicker, 200) &&
+        isValidString(data.heroHeadline, 300) &&
+        isValidString(data.heroQuote, 1500) &&
+        isNonEmptyString(data.storyImage, 450000) &&
+        isValidString(data.storyTitle, 200) &&
+        data.storyParagraphs is list && data.storyParagraphs.size() <= 30 &&
+        (data.storyParagraphs.size() == 0 || data.storyParagraphs[0] is string) &&
+        data.coreValues is list && data.coreValues.size() <= 12 &&
+        (data.coreValues.size() == 0 || data.coreValues[0] is map) &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidVaultConfig(data) {
+      return data.keys().hasAll([
+          'badgeLabel', 'pageTitle', 'pageSubtitle', 'coupleName', 'weddingDate',
+          'streamTitle', 'streamSubtitle', 'privacyBadgeText', 'howItWorksSteps', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'badgeLabel', 'pageTitle', 'pageSubtitle', 'coupleName', 'weddingDate',
+          'streamTitle', 'streamSubtitle', 'privacyBadgeText', 'howItWorksSteps', 'updatedAt'
+        ]) &&
+        isValidString(data.badgeLabel, 200) &&
+        isValidString(data.pageTitle, 200) &&
+        isValidString(data.pageSubtitle, 2000) &&
+        isValidString(data.coupleName, 200) &&
+        isValidString(data.weddingDate, 200) &&
+        isValidString(data.streamTitle, 200) &&
+        isValidString(data.streamSubtitle, 2000) &&
+        isValidString(data.privacyBadgeText, 300) &&
+        data.howItWorksSteps is list && data.howItWorksSteps.size() <= 6 &&
+        (data.howItWorksSteps.size() == 0 || data.howItWorksSteps[0] is map) &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidPricingConfig(data) {
+      return data.keys().hasAll(['packages', 'updatedAt']) &&
+        data.keys().hasOnly(['packages', 'updatedAt']) &&
+        data.packages is list && data.packages.size() <= 10 &&
+        (data.packages.size() == 0 || data.packages[0] is map) &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidGalleryPhoto(data, docId) {
+      return data.keys().hasAll(['id', 'url', 'title', 'caption', 'category', 'sortOrder', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'url', 'title', 'caption', 'category', 'sortOrder', 'updatedAt']) &&
+        data.id == docId &&
+        isValidId(data.id) &&
+        isNonEmptyString(data.url, 750000) &&
+        isValidString(data.title, 200) &&
+        isValidString(data.caption, 1000) &&
+        data.category in ['bridal-prep', 'ceremony', 'on-location', 'reception', 'dancing'] &&
+        data.sortOrder is number &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidFeaturedWedding(data, docId) {
+      return data.keys().hasAll([
+          'id', 'couple', 'date', 'venue', 'location',
+          'coverImage', 'story', 'highlightQuote', 'sortOrder', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'couple', 'date', 'venue', 'location',
+          'coverImage', 'story', 'highlightQuote', 'sortOrder', 'updatedAt'
+        ]) &&
+        data.id == docId &&
+        isValidId(data.id) &&
+        isValidString(data.couple, 200) &&
+        isValidString(data.date, 120) &&
+        isValidString(data.venue, 200) &&
+        isValidString(data.location, 200) &&
+        isNonEmptyString(data.coverImage, 750000) &&
+        isValidString(data.story, 5000) &&
+        isValidString(data.highlightQuote, 1000) &&
+        data.sortOrder is number &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidFeaturedWeddingPhoto(data, weddingId, photoId) {
+      return data.keys().hasAll(['id', 'weddingId', 'url', 'caption', 'sortOrder', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'weddingId', 'url', 'caption', 'sortOrder', 'updatedAt']) &&
+        data.id == photoId &&
+        data.weddingId == weddingId &&
+        isValidId(data.id) &&
+        isValidId(data.weddingId) &&
+        isNonEmptyString(data.url, 750000) &&
+        isValidString(data.caption, 1000) &&
+        data.sortOrder is number &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidFaq(data, docId) {
+      return data.keys().hasAll(['id', 'q', 'a', 'sortOrder', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'q', 'a', 'sortOrder', 'updatedAt']) &&
+        data.id == docId &&
+        isValidId(data.id) &&
+        isNonEmptyString(data.q, 500) &&
+        isNonEmptyString(data.a, 3000) &&
+        data.sortOrder is number &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidReview(data, docId) {
+      return data.keys().hasAll([
+          'id', 'couple', 'date', 'venue', 'rating',
+          'snippet', 'fullReview', 'highlight', 'sortOrder', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'couple', 'date', 'venue', 'rating',
+          'snippet', 'fullReview', 'highlight', 'sortOrder', 'updatedAt'
+        ]) &&
+        data.id == docId &&
+        isValidId(data.id) &&
+        isNonEmptyString(data.couple, 200) &&
+        isValidString(data.date, 120) &&
+        isValidString(data.venue, 200) &&
+        data.rating is number && data.rating >= 1 && data.rating <= 5 &&
+        isValidString(data.snippet, 1000) &&
+        isNonEmptyString(data.fullReview, 5000) &&
+        isValidString(data.highlight, 400) &&
+        data.sortOrder is number &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidBlogPost(data, docId) {
+      return data.keys().hasAll([
+          'id', 'slug', 'title', 'date', 'category',
+          'readTime', 'coverImage', 'excerpt', 'content', 'sortOrder', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'slug', 'title', 'date', 'category',
+          'readTime', 'coverImage', 'excerpt', 'content', 'sortOrder', 'updatedAt'
+        ]) &&
+        data.id == docId &&
+        isValidId(data.id) &&
+        isNonEmptyString(data.slug, 200) &&
+        isNonEmptyString(data.title, 300) &&
+        isValidString(data.date, 120) &&
+        isValidString(data.category, 120) &&
+        isValidString(data.readTime, 60) &&
+        isNonEmptyString(data.coverImage, 750000) &&
+        isValidString(data.excerpt, 1000) &&
+        data.content is list && data.content.size() <= 50 &&
+        (data.content.size() == 0 || data.content[0] is string) &&
+        data.sortOrder is number &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidVaultPhoto(data, docId) {
+      return data.keys().hasAll(['id', 'guestName', 'table', 'note', 'time', 'url', 'sortOrder', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'guestName', 'table', 'note', 'time', 'url', 'sortOrder', 'updatedAt']) &&
+        data.id == docId &&
+        isValidId(data.id) &&
+        isNonEmptyString(data.guestName, 200) &&
+        isValidString(data.table, 120) &&
+        isValidString(data.note, 1000) &&
+        isValidString(data.time, 120) &&
+        isNonEmptyString(data.url, 750000) &&
+        data.sortOrder is number &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidAdminRecord(data) {
+      return data.keys().hasAll(['email', 'role', 'createdAt']) &&
+        data.keys().hasOnly(['email', 'role', 'createdAt']) &&
+        isNonEmptyString(data.email, 320) &&
+        data.role == 'admin' &&
+        data.createdAt is timestamp;
+    }
+
+    // --- Collection Rules ---
+
+    // Private Admin Allowlist (PII isolated, bootstrapped admin management only)
+    match /admins/{uid} {
+      allow get: if isValidId(uid) && isAdmin();
+      allow list: if isAdmin();
+      allow create: if isValidId(uid) && isValidAdminRecord(incoming()) &&
+        incoming().createdAt == request.time && isBootstrappedAdmin();
+      allow update: if isValidId(uid) && isValidAdminRecord(incoming()) &&
+        incoming().createdAt == existing().createdAt && isBootstrappedAdmin();
+      allow delete: if isValidId(uid) && isBootstrappedAdmin();
+    }
+
+    // Public Studio Config Singletons
+    match /studioConfig/about {
+      allow get: if true;
+      allow create: if isVerified() && isValidAboutConfig(incoming()) && isAdmin();
+      allow update: if isVerified() && isValidAboutConfig(incoming()) && isAdmin();
+      allow delete: if isVerified() && isAdmin();
+    }
+
+    match /studioConfig/vault {
+      allow get: if true;
+      allow create: if isVerified() && isValidVaultConfig(incoming()) && isAdmin();
+      allow update: if isVerified() && isValidVaultConfig(incoming()) && isAdmin();
+      allow delete: if isVerified() && isAdmin();
+    }
+
+    match /studioConfig/pricing {
+      allow get: if true;
+      allow create: if isVerified() && isValidPricingConfig(incoming()) && isAdmin();
+      allow update: if isVerified() && isValidPricingConfig(incoming()) && isAdmin();
+      allow delete: if isVerified() && isAdmin();
+    }
+
+    // Public Wedding Gallery Photos
+    match /galleryPhotos/{photoId} {
+      allow get: if isValidId(photoId);
+      allow list: if resource.data.id is string;
+      allow create: if isVerified() && isValidId(photoId) && isValidGalleryPhoto(incoming(), photoId) && isAdmin();
+      allow update: if isVerified() && isValidId(photoId) && isValidGalleryPhoto(incoming(), photoId) &&
+        incoming().id == existing().id && isAdmin();
+      allow delete: if isVerified() && isValidId(photoId) && isAdmin();
+    }
+
+    // Public Featured Weddings & Subcollection Photos
+    match /featuredWeddings/{weddingId} {
+      allow get: if isValidId(weddingId);
+      allow list: if resource.data.id is string;
+      allow create: if isVerified() && isValidId(weddingId) && isValidFeaturedWedding(incoming(), weddingId) && isAdmin();
+      allow update: if isVerified() && isValidId(weddingId) && isValidFeaturedWedding(incoming(), weddingId) &&
+        incoming().id == existing().id && isAdmin();
+      allow delete: if isVerified() && isValidId(weddingId) && isAdmin();
+
+      match /photos/{photoId} {
+        allow get: if isValidId(weddingId) && isValidId(photoId);
+        allow list: if isValidId(weddingId) && resource.data.weddingId == weddingId;
+        allow create: if isVerified() && isValidId(weddingId) && isValidId(photoId) &&
+          isValidFeaturedWeddingPhoto(incoming(), weddingId, photoId) &&
+          isAdmin() &&
+          existsAfter(/databases/$(database)/documents/featuredWeddings/$(weddingId));
+        allow update: if isVerified() && isValidId(weddingId) && isValidId(photoId) &&
+          isValidFeaturedWeddingPhoto(incoming(), weddingId, photoId) &&
+          incoming().id == existing().id &&
+          incoming().weddingId == existing().weddingId &&
+          isAdmin() &&
+          exists(/databases/$(database)/documents/featuredWeddings/$(weddingId));
+        allow delete: if isVerified() && isValidId(weddingId) && isValidId(photoId) && isAdmin();
+      }
+    }
+
+    // Public FAQs
+    match /faqs/{faqId} {
+      allow get: if isValidId(faqId);
+      allow list: if resource.data.id is string;
+      allow create: if isVerified() && isValidId(faqId) && isValidFaq(incoming(), faqId) && isAdmin();
+      allow update: if isVerified() && isValidId(faqId) && isValidFaq(incoming(), faqId) &&
+        incoming().id == existing().id && isAdmin();
+      allow delete: if isVerified() && isValidId(faqId) && isAdmin();
+    }
+
+    // Public Reviews (Studio Admin full control)
+    match /reviews/{reviewId} {
+      allow get: if isValidId(reviewId);
+      allow list: if resource.data.id is string;
+      allow create: if isVerified() && isValidId(reviewId) && isValidReview(incoming(), reviewId) && isAdmin();
+      allow update: if isVerified() && isValidId(reviewId) && isValidReview(incoming(), reviewId) &&
+        incoming().id == existing().id && isAdmin();
+      allow delete: if isVerified() && isValidId(reviewId) && isAdmin();
+    }
+
+    // Public Blog Posts
+    match /blogPosts/{postId} {
+      allow get: if isValidId(postId);
+      allow list: if resource.data.id is string;
+      allow create: if isVerified() && isValidId(postId) && isValidBlogPost(incoming(), postId) && isAdmin();
+      allow update: if isVerified() && isValidId(postId) && isValidBlogPost(incoming(), postId) &&
+        incoming().id == existing().id && isAdmin();
+      allow delete: if isVerified() && isValidId(postId) && isAdmin();
+    }
+
+    // Public Guest Photo Vault Snaps
+    match /vaultPhotos/{photoId} {
+      allow get: if isValidId(photoId);
+      allow list: if resource.data.id is string;
+      allow create: if isVerified() && isValidId(photoId) && isValidVaultPhoto(incoming(), photoId) && isAdmin();
+      allow update: if isVerified() && isValidId(photoId) && isValidVaultPhoto(incoming(), photoId) &&
+        incoming().id == existing().id && isAdmin();
+      allow delete: if isVerified() && isValidId(photoId) && isAdmin();
+    }
+  }
+}

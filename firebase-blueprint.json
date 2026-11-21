@@ -1,0 +1,283 @@
+{
+  "entities": {
+    "AboutConfig": {
+      "title": "AboutConfig",
+      "description": "Public homepage hero and About Us page copy and photography configuration.",
+      "type": "object",
+      "properties": {
+        "homepageHeroImage": { "type": "string", "maxLength": 450000 },
+        "homepageTitle": { "type": "string", "maxLength": 200 },
+        "homepageText": { "type": "string", "maxLength": 4000 },
+        "homepageImage": { "type": "string", "maxLength": 450000 },
+        "heroKicker": { "type": "string", "maxLength": 200 },
+        "heroHeadline": { "type": "string", "maxLength": 300 },
+        "heroQuote": { "type": "string", "maxLength": 1500 },
+        "storyImage": { "type": "string", "maxLength": 450000 },
+        "storyTitle": { "type": "string", "maxLength": 200 },
+        "storyParagraphs": { "type": "array" },
+        "coreValues": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "homepageHeroImage",
+        "homepageTitle",
+        "homepageText",
+        "homepageImage",
+        "heroKicker",
+        "heroHeadline",
+        "heroQuote",
+        "storyImage",
+        "storyTitle",
+        "storyParagraphs",
+        "coreValues",
+        "updatedAt"
+      ]
+    },
+    "VaultConfig": {
+      "title": "VaultConfig",
+      "description": "Public Guest Photo Vault headings, intro text, and 3 How It Works steps.",
+      "type": "object",
+      "properties": {
+        "badgeLabel": { "type": "string", "maxLength": 200 },
+        "pageTitle": { "type": "string", "maxLength": 200 },
+        "pageSubtitle": { "type": "string", "maxLength": 2000 },
+        "coupleName": { "type": "string", "maxLength": 200 },
+        "weddingDate": { "type": "string", "maxLength": 200 },
+        "streamTitle": { "type": "string", "maxLength": 200 },
+        "streamSubtitle": { "type": "string", "maxLength": 2000 },
+        "privacyBadgeText": { "type": "string", "maxLength": 300 },
+        "howItWorksSteps": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "badgeLabel",
+        "pageTitle",
+        "pageSubtitle",
+        "coupleName",
+        "weddingDate",
+        "streamTitle",
+        "streamSubtitle",
+        "privacyBadgeText",
+        "howItWorksSteps",
+        "updatedAt"
+      ]
+    },
+    "PricingConfig": {
+      "title": "PricingConfig",
+      "description": "Public wedding photography pricing packages.",
+      "type": "object",
+      "properties": {
+        "packages": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["packages", "updatedAt"]
+    },
+    "GalleryPhoto": {
+      "title": "GalleryPhoto",
+      "description": "Individual photograph in the categorized Wedding Gallery.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "url": { "type": "string", "maxLength": 750000 },
+        "title": { "type": "string", "maxLength": 200 },
+        "caption": { "type": "string", "maxLength": 1000 },
+        "category": {
+          "type": "string",
+          "enum": ["bridal-prep", "ceremony", "on-location", "reception", "dancing"]
+        },
+        "sortOrder": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "url", "title", "caption", "category", "sortOrder", "updatedAt"]
+    },
+    "FeaturedWedding": {
+      "title": "FeaturedWedding",
+      "description": "One of the 3 featured wedding stories.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "couple": { "type": "string", "maxLength": 200 },
+        "date": { "type": "string", "maxLength": 120 },
+        "venue": { "type": "string", "maxLength": 200 },
+        "location": { "type": "string", "maxLength": 200 },
+        "coverImage": { "type": "string", "maxLength": 750000 },
+        "story": { "type": "string", "maxLength": 5000 },
+        "highlightQuote": { "type": "string", "maxLength": 1000 },
+        "sortOrder": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "couple",
+        "date",
+        "venue",
+        "location",
+        "coverImage",
+        "story",
+        "highlightQuote",
+        "sortOrder",
+        "updatedAt"
+      ]
+    },
+    "FeaturedWeddingPhoto": {
+      "title": "FeaturedWeddingPhoto",
+      "description": "Individual photograph belonging to a Featured Wedding story.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "weddingId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "url": { "type": "string", "maxLength": 750000 },
+        "caption": { "type": "string", "maxLength": 1000 },
+        "sortOrder": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "weddingId", "url", "caption", "sortOrder", "updatedAt"]
+    },
+    "FaqItem": {
+      "title": "FaqItem",
+      "description": "Frequently asked question on the About Us page.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "q": { "type": "string", "maxLength": 500 },
+        "a": { "type": "string", "maxLength": 3000 },
+        "sortOrder": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "q", "a", "sortOrder", "updatedAt"]
+    },
+    "Review": {
+      "title": "Review",
+      "description": "Client testimonial shown on the Kind Words & Reviews page.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "couple": { "type": "string", "maxLength": 200 },
+        "date": { "type": "string", "maxLength": 120 },
+        "venue": { "type": "string", "maxLength": 200 },
+        "rating": { "type": "number" },
+        "snippet": { "type": "string", "maxLength": 1000 },
+        "fullReview": { "type": "string", "maxLength": 5000 },
+        "highlight": { "type": "string", "maxLength": 400 },
+        "sortOrder": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "couple",
+        "date",
+        "venue",
+        "rating",
+        "snippet",
+        "fullReview",
+        "highlight",
+        "sortOrder",
+        "updatedAt"
+      ]
+    },
+    "BlogPost": {
+      "title": "BlogPost",
+      "description": "Wedding photography journal article.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "slug": { "type": "string", "maxLength": 200 },
+        "title": { "type": "string", "maxLength": 300 },
+        "date": { "type": "string", "maxLength": 120 },
+        "category": { "type": "string", "maxLength": 120 },
+        "readTime": { "type": "string", "maxLength": 60 },
+        "coverImage": { "type": "string", "maxLength": 750000 },
+        "excerpt": { "type": "string", "maxLength": 1000 },
+        "content": { "type": "array" },
+        "sortOrder": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "slug",
+        "title",
+        "date",
+        "category",
+        "readTime",
+        "coverImage",
+        "excerpt",
+        "content",
+        "sortOrder",
+        "updatedAt"
+      ]
+    },
+    "VaultPhoto": {
+      "title": "VaultPhoto",
+      "description": "Guest photo snap displayed in the Guest Photo Vault gallery.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "guestName": { "type": "string", "maxLength": 200 },
+        "table": { "type": "string", "maxLength": 120 },
+        "note": { "type": "string", "maxLength": 1000 },
+        "time": { "type": "string", "maxLength": 120 },
+        "url": { "type": "string", "maxLength": 750000 },
+        "sortOrder": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "guestName", "table", "note", "time", "url", "sortOrder", "updatedAt"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Authorized MMC Studio administrator UID record.",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "maxLength": 320 },
+        "role": { "type": "string", "enum": ["admin"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "role", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/studioConfig/about": {
+      "schema": { "$ref": "#/entities/AboutConfig" },
+      "description": "Singleton document storing Homepage Hero & About Us configuration."
+    },
+    "/studioConfig/vault": {
+      "schema": { "$ref": "#/entities/VaultConfig" },
+      "description": "Singleton document storing Guest Photo Vault text & steps."
+    },
+    "/studioConfig/pricing": {
+      "schema": { "$ref": "#/entities/PricingConfig" },
+      "description": "Singleton document storing wedding photography pricing packages."
+    },
+    "/galleryPhotos/{photoId}": {
+      "schema": { "$ref": "#/entities/GalleryPhoto" },
+      "description": "Categorized wedding gallery photographs."
+    },
+    "/featuredWeddings/{weddingId}": {
+      "schema": { "$ref": "#/entities/FeaturedWedding" },
+      "description": "Featured wedding stories (metadata and cover photo)."
+    },
+    "/featuredWeddings/{weddingId}/photos/{photoId}": {
+      "schema": { "$ref": "#/entities/FeaturedWeddingPhoto" },
+      "description": "Individual photos belonging to a featured wedding story."
+    },
+    "/faqs/{faqId}": {
+      "schema": { "$ref": "#/entities/FaqItem" },
+      "description": "Frequently asked questions displayed on the About Us page."
+    },
+    "/reviews/{reviewId}": {
+      "schema": { "$ref": "#/entities/Review" },
+      "description": "Couple reviews displayed on the Kind Words & Reviews page."
+    },
+    "/blogPosts/{postId}": {
+      "schema": { "$ref": "#/entities/BlogPost" },
+      "description": "Wedding photography blog articles."
+    },
+    "/vaultPhotos/{photoId}": {
+      "schema": { "$ref": "#/entities/VaultPhoto" },
+      "description": "Guest Photo Vault snaps and memories."
+    },
+    "/admins/{uid}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Private allowlist of authorized studio administrators."
+    }
+  }
+}

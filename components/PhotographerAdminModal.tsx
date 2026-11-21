@@ -1,7 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Image from 'next/image';
+import type { User } from 'firebase/auth';
 import {
   X,
   Lock,
@@ -19,6 +20,10 @@ import {
   HelpCircle,
   Image as ImageIcon,
   Camera,
+  Cloud,
+  LogIn,
+  LogOut,
+  AlertCircle,
 } from 'lucide-react';
 import {
   FeaturedWedding,
@@ -34,6 +39,13 @@ import {
   VaultPhoto,
 } from '@/lib/wedding-data';
 import { optimizeUploadedImage } from '@/lib/studio-storage';
+import {
+  isAuthorizedStudioUser,
+  signInStudioAdmin,
+  signOutStudioAdmin,
+  subscribeStudioAuth,
+} from '@/lib/firebase';
+import { publishAllStudioDataToCloud } from '@/lib/studio-cloud-sync';
 
 interface PhotographerAdminModalProps {
   isOpen: boolean;
@@ -170,11 +182,86 @@ export default function PhotographerAdminModal({
   const [newVaultTime, setNewVaultTime] = useState('');
   const [newVaultNote, setNewVaultNote] = useState('');
 
+  // Studio Owner Firebase Auth & Cloud Sync state
+  const [authUser, setAuthUser] = useState<User | null>(null);
+  const [isSigningIn, setIsSigningIn] = useState(false);
+  const [isPublishingLive, setIsPublishingLive] = useState(false);
+  const [cloudErrorMsg, setCloudErrorMsg] = useState('');
+
+  useEffect(() => {
+    const unsub = subscribeStudioAuth(user => {
+      setAuthUser(user);
+    });
+    return () => unsub();
+  }, []);
+
   if (!isOpen) return null;
 
+  const isStudioAdmin = isAuthorizedStudioUser(authUser);
+
   const showSuccess = (msg: string) => {
+    setCloudErrorMsg('');
     setSaveSuccessMsg(msg);
-    setTimeout(() => setSaveSuccessMsg(''), 3000);
+    setTimeout(() => setSaveSuccessMsg(''), 4000);
+  };
+
+  const handleAdminSignIn = async () => {
+    setIsSigningIn(true);
+    setCloudErrorMsg('');
+    try {
+      const user = await signInStudioAdmin();
+      if (!isAuthorizedStudioUser(user)) {
+        setCloudErrorMsg(
+          `Signed in as ${user.email || 'unknown account'}, which is not listed as the Studio Owner account. Please sign in with your Studio Owner Google account.`
+        );
+      } else {
+        showSuccess(`Signed in as ${user.email}. Click "Publish All Changes Live" to push any local edits to the live website.`);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Sign-in was cancelled or blocked.';
+      setCloudErrorMsg(
+        message.includes('unauthorized-domain')
+          ? 'This domain needs to be added under Firebase Console → Authentication → Settings → Authorized domains before Google sign-in works here.'
+          : 'Could not complete Google sign-in. Please allow popups and try again.'
+      );
+    } finally {
+      setIsSigningIn(false);
+    }
+  };
+
+  const handleAdminSignOut = async () => {
+    await signOutStudioAdmin();
+    showSuccess('Signed out of Studio Cloud Sync.');
+  };
+
+  const handlePublishAllLive = async (customSuccessMsg?: string) => {
+    if (!isStudioAdmin) {
+      setCloudErrorMsg('Please sign in with your Studio Owner Google account above so changes publish live to all visitors.');
+      return;
+    }
+    setIsPublishingLive(true);
+    setCloudErrorMsg('');
+    try {
+      await publishAllStudioDataToCloud({
+        galleryPhotos,
+        featuredWeddings,
+        pricingPackages,
+        aboutContent,
+        faqs,
+        reviews,
+        blogPosts,
+        vaultContent,
+        vaultPhotos,
+      });
+      showSuccess(customSuccessMsg || 'All changes published live to www.mmcphotography.co.uk!');
+    } catch (err) {
+      console.error('Failed to publish live changes:', err);
+      setCloudErrorMsg(
+        'Could not publish to the live cloud database. Please verify you are signed in with your Studio Owner account and try again.'
+      );
+    } finally {
+      setIsPublishingLive(false);
+    }
   };
 
   const handleFileUpload = async (
@@ -186,7 +273,7 @@ export default function PhotographerAdminModal({
     if (!file) return;
 
     try {
-      const optimizedUrl = await optimizeUploadedImage(file);
+      const optimizedUrl = await optimizeUploadedImage(file, 1280, 0.78, 240000);
       callback(optimizedUrl);
     } catch (err) {
       console.error('Failed to process uploaded image:', err);
@@ -395,10 +482,77 @@ export default function PhotographerAdminModal({
           </button>
         </div>
 
+        {/* Cloud Sync / Studio Owner Auth Bar */}
+        <div
+          className={`px-6 py-2.5 border-b text-xs flex flex-wrap items-center justify-between gap-3 shrink-0 ${
+            isStudioAdmin
+              ? 'bg-emerald-50/80 border-emerald-200 text-emerald-900'
+              : 'bg-amber-50 border-amber-200 text-amber-950'
+          }`}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <Cloud
+              className={`w-4 h-4 shrink-0 ${
+                isStudioAdmin ? 'text-emerald-600' : 'text-amber-600'
+              }`}
+            />
+            {isStudioAdmin ? (
+              <span className="truncate">
+                <strong>Live Cloud Sync Active</strong> ({authUser?.email}) — Changes publish automatically for all visitors.
+              </span>
+            ) : (
+              <span>
+                <strong>Sign in required for live website updates:</strong> Sign in with your Studio Owner Google account so edits publish live to all visitors.
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {isStudioAdmin ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => void handlePublishAllLive()}
+                  disabled={isPublishingLive}
+                  className="bg-[#1e2321] hover:bg-stone-800 text-white px-3.5 py-1.5 rounded text-[11px] uppercase tracking-wider font-sans font-semibold transition-colors disabled:opacity-50"
+                >
+                  {isPublishingLive ? 'Publishing...' : 'Publish All Changes Live'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleAdminSignOut()}
+                  className="inline-flex items-center gap-1 border border-stone-300 bg-white hover:bg-stone-100 text-stone-700 px-2.5 py-1.5 rounded text-[11px] font-semibold transition-colors"
+                >
+                  <LogOut className="w-3 h-3" />
+                  <span>Sign Out</span>
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void handleAdminSignIn()}
+                disabled={isSigningIn}
+                className="inline-flex items-center gap-1.5 bg-[#1e2321] hover:bg-stone-800 text-white px-3.5 py-1.5 rounded text-[11px] uppercase tracking-wider font-sans font-semibold transition-colors disabled:opacity-50"
+              >
+                <LogIn className="w-3.5 h-3.5 text-[#c2a378]" />
+                <span>{isSigningIn ? 'Signing In...' : authUser ? 'Switch Google Account' : 'Sign In with Google'}</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Cloud Error Notice Banner */}
+        {cloudErrorMsg && (
+          <div className="bg-red-50 border-b border-red-200 text-red-800 text-xs py-2 px-6 flex items-center gap-2 shrink-0">
+            <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+            <span>{cloudErrorMsg}</span>
+          </div>
+        )}
+
         {/* Global Save Notice Banner */}
         {saveSuccessMsg && (
-          <div className="bg-emerald-50 border-b border-emerald-200 text-emerald-800 text-xs py-2 px-6 flex items-center gap-2">
-            <Check className="w-4 h-4 text-emerald-600" />
+          <div className="bg-emerald-50 border-b border-emerald-200 text-emerald-800 text-xs py-2 px-6 flex items-center gap-2 shrink-0">
+            <Check className="w-4 h-4 text-emerald-600 shrink-0" />
             <span>{saveSuccessMsg}</span>
           </div>
         )}
@@ -483,7 +637,7 @@ export default function PhotographerAdminModal({
           </div>
 
           <div className="text-[11px] text-stone-400 normal-case pb-2 hidden lg:block">
-            Auto-saves directly to your browser
+            {isStudioAdmin ? 'Auto-syncing live to website' : 'Local preview until signed in'}
           </div>
         </div>
 
@@ -2221,10 +2375,11 @@ export default function PhotographerAdminModal({
 
                 <button
                   type="button"
-                  onClick={() => showSuccess('About Us changes saved!')}
-                  className="bg-[#1e2321] text-white px-6 py-2.5 rounded text-xs uppercase tracking-widest font-sans font-semibold hover:bg-stone-800 transition-colors"
+                  onClick={() => void handlePublishAllLive('About Us changes published live!')}
+                  disabled={isPublishingLive}
+                  className="bg-[#1e2321] text-white px-6 py-2.5 rounded text-xs uppercase tracking-widest font-sans font-semibold hover:bg-stone-800 transition-colors disabled:opacity-50"
                 >
-                  Save Changes
+                  {isPublishingLive ? 'Publishing...' : 'Save Changes'}
                 </button>
               </div>
             </div>
@@ -2684,10 +2839,11 @@ export default function PhotographerAdminModal({
 
                 <button
                   type="button"
-                  onClick={() => showSuccess('Guest Photo Vault changes saved!')}
-                  className="bg-[#1e2321] text-white px-6 py-2.5 rounded text-xs uppercase tracking-widest font-sans font-semibold hover:bg-stone-800 transition-colors"
+                  onClick={() => void handlePublishAllLive('Guest Photo Vault changes published live!')}
+                  disabled={isPublishingLive}
+                  className="bg-[#1e2321] text-white px-6 py-2.5 rounded text-xs uppercase tracking-widest font-sans font-semibold hover:bg-stone-800 transition-colors disabled:opacity-50"
                 >
-                  Save Changes
+                  {isPublishingLive ? 'Publishing...' : 'Save Changes'}
                 </button>
               </div>
             </div>
@@ -2696,13 +2852,29 @@ export default function PhotographerAdminModal({
 
         {/* Footer */}
         <div className="bg-stone-100 px-6 py-3 border-t border-stone-200 flex items-center justify-between text-xs text-stone-600 shrink-0">
-          <span>Logged in as MMC Studio Owner</span>
-          <button
-            onClick={onClose}
-            className="bg-[#1e2321] text-white px-5 py-2 rounded text-xs uppercase tracking-wider font-sans font-semibold hover:bg-stone-800 transition-colors"
-          >
-            Close Studio Manager
-          </button>
+          <span>
+            {isStudioAdmin
+              ? `Cloud Connected: ${authUser?.email}`
+              : 'MMC Studio Owner Portal (Sign in above to publish live)'}
+          </span>
+          <div className="flex items-center gap-2.5">
+            {isStudioAdmin && (
+              <button
+                type="button"
+                onClick={() => void handlePublishAllLive()}
+                disabled={isPublishingLive}
+                className="border border-stone-400 bg-white text-stone-900 hover:bg-stone-200 px-4 py-2 rounded text-xs uppercase tracking-wider font-sans font-semibold transition-colors disabled:opacity-50"
+              >
+                {isPublishingLive ? 'Publishing...' : 'Publish Live Now'}
+              </button>
+            )}
+            <button
+              onClick={onClose}
+              className="bg-[#1e2321] text-white px-5 py-2 rounded text-xs uppercase tracking-wider font-sans font-semibold hover:bg-stone-800 transition-colors"
+            >
+              Close Studio Manager
+            </button>
+          </div>
         </div>
       </div>
     </div>

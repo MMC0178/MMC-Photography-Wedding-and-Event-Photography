@@ -16,8 +16,10 @@ export default function nextConfig(phase: string): NextConfig {
       'ais-pre-oemip4j2q3y7lr2kfnvkhd-245135975116.europe-west2.run.app',
       '**.run.app',
     ],
-    // Allow access to remote image placeholder.
+    // Serve Unsplash & uploaded photographs reliably on both AI Studio and Hostinger
     images: {
+      loader: 'custom',
+      loaderFile: './lib/image-loader.ts',
       remotePatterns: [
         {
           protocol: 'https',

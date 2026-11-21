@@ -12,6 +12,17 @@ import {
   BLOG_POSTS,
 } from './wedding-data';
 import { idbGet, idbSet } from './studio-storage';
+import {
+  subscribeAboutCloud,
+  syncAboutContentToCloud,
+  syncAboutContentToCloudDebounced,
+  syncFaqsToCloud,
+  syncFaqsToCloudDebounced,
+  syncReviewsToCloud,
+  syncReviewsToCloudDebounced,
+  syncBlogPostsToCloud,
+  syncBlogPostsToCloudDebounced,
+} from './studio-cloud-sync';
 
 const ABOUT_CONTENT_KEY = 'mmc_about_content_v1';
 const FAQS_KEY = 'mmc_faqs_v1';
@@ -54,7 +65,9 @@ function readLocalAboutData(): AboutStoreState {
       return DEFAULT_ABOUT_STATE;
     }
 
-    const aboutContent = rawContent ? { ...INITIAL_ABOUT_CONTENT, ...JSON.parse(rawContent) } : INITIAL_ABOUT_CONTENT;
+    const aboutContent = rawContent
+      ? { ...INITIAL_ABOUT_CONTENT, ...JSON.parse(rawContent) }
+      : INITIAL_ABOUT_CONTENT;
     const faqs = rawFaqs ? JSON.parse(rawFaqs) : INITIAL_FAQS;
     const reviews = rawReviews ? JSON.parse(rawReviews) : REVIEWS;
     const blogPosts = rawBlogs ? JSON.parse(rawBlogs) : BLOG_POSTS;
@@ -77,8 +90,10 @@ export function getStoredAboutData(): AboutStoreState {
   return readLocalAboutData();
 }
 
-function saveAll(state: AboutStoreState): void {
-  hasMutated = true;
+function saveAllLocally(state: AboutStoreState, markMutated = true): void {
+  if (markMutated) {
+    hasMutated = true;
+  }
   cachedAboutState = state;
   if (typeof window === 'undefined') return;
 
@@ -91,16 +106,27 @@ function saveAll(state: AboutStoreState): void {
     localStorage.setItem(REVIEWS_KEY, JSON.stringify(state.reviews));
     localStorage.setItem(BLOG_POSTS_KEY, JSON.stringify(state.blogPosts));
   } catch {
-    // Ignore localStorage quota errors; IndexedDB retains the full dataset
+    // Ignore localStorage quota errors; IndexedDB & Firestore retain the full dataset
   }
 }
 
 export function updateAboutContent(updates: Partial<AboutContent>): void {
   const current = getStoredAboutData();
-  saveAll({
-    ...current,
-    aboutContent: { ...current.aboutContent, ...updates },
-  });
+  const nextAbout = { ...current.aboutContent, ...updates };
+  saveAllLocally({ ...current, aboutContent: nextAbout }, true);
+
+  const isImageUpdate =
+    typeof updates.homepageHeroImage === 'string' ||
+    typeof updates.homepageImage === 'string' ||
+    typeof updates.storyImage === 'string';
+
+  if (isImageUpdate) {
+    void syncAboutContentToCloud(nextAbout).catch(err => {
+      console.error('Failed to sync about content to cloud:', err);
+    });
+  } else {
+    syncAboutContentToCloudDebounced(nextAbout);
+  }
 }
 
 // FAQ CRUD
@@ -110,24 +136,23 @@ export function addFaqItem(faq: Omit<FaqItem, 'id'>): void {
     ...faq,
     id: `faq-${Date.now()}-${Math.random().toString(36).substring(2, 5)}`,
   };
-  saveAll({
-    ...current,
-    faqs: [...current.faqs, newFaq],
-  });
+  const nextFaqs = [...current.faqs, newFaq];
+  saveAllLocally({ ...current, faqs: nextFaqs }, true);
+  void syncFaqsToCloud(nextFaqs).catch(err => console.error('Failed to sync FAQs:', err));
 }
 
 export function updateFaqItem(id: string, updates: Partial<FaqItem>): void {
   const current = getStoredAboutData();
-  const updated = current.faqs.map(f => (f.id === id ? { ...f, ...updates } : f));
-  saveAll({ ...current, faqs: updated });
+  const nextFaqs = current.faqs.map(f => (f.id === id ? { ...f, ...updates } : f));
+  saveAllLocally({ ...current, faqs: nextFaqs }, true);
+  syncFaqsToCloudDebounced(nextFaqs);
 }
 
 export function deleteFaqItem(id: string): void {
   const current = getStoredAboutData();
-  saveAll({
-    ...current,
-    faqs: current.faqs.filter(f => f.id !== id),
-  });
+  const nextFaqs = current.faqs.filter(f => f.id !== id);
+  saveAllLocally({ ...current, faqs: nextFaqs }, true);
+  void syncFaqsToCloud(nextFaqs).catch(err => console.error('Failed to sync FAQs:', err));
 }
 
 // Review CRUD
@@ -137,24 +162,23 @@ export function addReviewItem(review: Omit<Review, 'id'>): void {
     ...review,
     id: `rev-${Date.now()}-${Math.random().toString(36).substring(2, 5)}`,
   };
-  saveAll({
-    ...current,
-    reviews: [newRev, ...current.reviews],
-  });
+  const nextReviews = [newRev, ...current.reviews];
+  saveAllLocally({ ...current, reviews: nextReviews }, true);
+  void syncReviewsToCloud(nextReviews).catch(err => console.error('Failed to sync reviews:', err));
 }
 
 export function updateReviewItem(id: string, updates: Partial<Review>): void {
   const current = getStoredAboutData();
-  const updated = current.reviews.map(r => (r.id === id ? { ...r, ...updates } : r));
-  saveAll({ ...current, reviews: updated });
+  const nextReviews = current.reviews.map(r => (r.id === id ? { ...r, ...updates } : r));
+  saveAllLocally({ ...current, reviews: nextReviews }, true);
+  syncReviewsToCloudDebounced(nextReviews);
 }
 
 export function deleteReviewItem(id: string): void {
   const current = getStoredAboutData();
-  saveAll({
-    ...current,
-    reviews: current.reviews.filter(r => r.id !== id),
-  });
+  const nextReviews = current.reviews.filter(r => r.id !== id);
+  saveAllLocally({ ...current, reviews: nextReviews }, true);
+  void syncReviewsToCloud(nextReviews).catch(err => console.error('Failed to sync reviews:', err));
 }
 
 // Blog Post CRUD
@@ -171,28 +195,37 @@ export function addBlogPost(post: Omit<BlogPost, 'id' | 'slug'>): void {
     id,
     slug,
   };
-  saveAll({
-    ...current,
-    blogPosts: [newPost, ...current.blogPosts],
-  });
+  const nextPosts = [newPost, ...current.blogPosts];
+  saveAllLocally({ ...current, blogPosts: nextPosts }, true);
+  void syncBlogPostsToCloud(nextPosts).catch(err => console.error('Failed to sync blog posts:', err));
 }
 
 export function updateBlogPost(id: string, updates: Partial<BlogPost>): void {
   const current = getStoredAboutData();
-  const updated = current.blogPosts.map(p => (p.id === id ? { ...p, ...updates } : p));
-  saveAll({ ...current, blogPosts: updated });
+  const nextPosts = current.blogPosts.map(p => (p.id === id ? { ...p, ...updates } : p));
+  saveAllLocally({ ...current, blogPosts: nextPosts }, true);
+  if (typeof updates.coverImage === 'string') {
+    void syncBlogPostsToCloud(nextPosts).catch(err => console.error('Failed to sync blog posts:', err));
+  } else {
+    syncBlogPostsToCloudDebounced(nextPosts);
+  }
 }
 
 export function deleteBlogPost(id: string): void {
   const current = getStoredAboutData();
-  saveAll({
-    ...current,
-    blogPosts: current.blogPosts.filter(p => p.id !== id),
-  });
+  const nextPosts = current.blogPosts.filter(p => p.id !== id);
+  saveAllLocally({ ...current, blogPosts: nextPosts }, true);
+  void syncBlogPostsToCloud(nextPosts).catch(err => console.error('Failed to sync blog posts:', err));
 }
 
 export function resetAboutToDefaults(): void {
-  saveAll(DEFAULT_ABOUT_STATE);
+  saveAllLocally(DEFAULT_ABOUT_STATE, true);
+  void Promise.all([
+    syncAboutContentToCloud(DEFAULT_ABOUT_STATE.aboutContent),
+    syncFaqsToCloud(DEFAULT_ABOUT_STATE.faqs),
+    syncReviewsToCloud(DEFAULT_ABOUT_STATE.reviews),
+    syncBlogPostsToCloud(DEFAULT_ABOUT_STATE.blogPosts),
+  ]).catch(err => console.error('Failed to reset About data in cloud:', err));
 }
 
 export function useAboutSection() {
@@ -204,26 +237,88 @@ export function useAboutSection() {
 
   useEffect(() => {
     let active = true;
+    let receivedCloudAbout = false;
+    let receivedCloudFaqs = false;
+    let receivedCloudReviews = false;
+    let receivedCloudBlogs = false;
 
     void idbGet<AboutStoreState>(IDB_KEY).then(stored => {
       if (!active || hasMutated) return;
+      const base = cachedAboutState || DEFAULT_ABOUT_STATE;
       if (stored && stored.aboutContent) {
         const normalized: AboutStoreState = {
-          aboutContent: { ...INITIAL_ABOUT_CONTENT, ...stored.aboutContent },
-          faqs: Array.isArray(stored.faqs) ? stored.faqs : INITIAL_FAQS,
-          reviews: Array.isArray(stored.reviews) ? stored.reviews : REVIEWS,
-          blogPosts: Array.isArray(stored.blogPosts) ? stored.blogPosts : BLOG_POSTS,
+          aboutContent: receivedCloudAbout
+            ? base.aboutContent
+            : { ...INITIAL_ABOUT_CONTENT, ...stored.aboutContent },
+          faqs: receivedCloudFaqs
+            ? base.faqs
+            : Array.isArray(stored.faqs)
+              ? stored.faqs
+              : INITIAL_FAQS,
+          reviews: receivedCloudReviews
+            ? base.reviews
+            : Array.isArray(stored.reviews)
+              ? stored.reviews
+              : REVIEWS,
+          blogPosts: receivedCloudBlogs
+            ? base.blogPosts
+            : Array.isArray(stored.blogPosts)
+              ? stored.blogPosts
+              : BLOG_POSTS,
         };
         cachedAboutState = normalized;
         setData(normalized);
       } else {
         const local = readLocalAboutData();
-        if (local !== DEFAULT_ABOUT_STATE) {
+        if (local !== DEFAULT_ABOUT_STATE && !receivedCloudAbout) {
           cachedAboutState = local;
           setData(local);
           void idbSet(IDB_KEY, local);
         }
       }
+    });
+
+    const unsubCloud = subscribeAboutCloud({
+      onAboutContent: cloudAbout => {
+        if (!active) return;
+        receivedCloudAbout = true;
+        const next: AboutStoreState = {
+          ...getStoredAboutData(),
+          aboutContent: cloudAbout,
+        };
+        saveAllLocally(next, false);
+        setData(next);
+      },
+      onFaqs: cloudFaqs => {
+        if (!active) return;
+        receivedCloudFaqs = true;
+        const next: AboutStoreState = {
+          ...getStoredAboutData(),
+          faqs: cloudFaqs,
+        };
+        saveAllLocally(next, false);
+        setData(next);
+      },
+      onReviews: cloudReviews => {
+        if (!active) return;
+        receivedCloudReviews = true;
+        const next: AboutStoreState = {
+          ...getStoredAboutData(),
+          reviews: cloudReviews,
+        };
+        saveAllLocally(next, false);
+        setData(next);
+      },
+      onBlogPosts: cloudPosts => {
+        if (!active) return;
+        receivedCloudBlogs = true;
+        const next: AboutStoreState = {
+          ...getStoredAboutData(),
+          blogPosts: cloudPosts,
+        };
+        saveAllLocally(next, false);
+        setData(next);
+      },
     });
 
     const handleUpdate = () => {
@@ -233,6 +328,7 @@ export function useAboutSection() {
     window.addEventListener('storage', handleUpdate);
     return () => {
       active = false;
+      unsubCloud();
       window.removeEventListener(CHANGE_EVENT, handleUpdate);
       window.removeEventListener('storage', handleUpdate);
     };

@@ -1,7 +1,17 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { PricingPackage, PricingAddon, INITIAL_PRICING_PACKAGES, INITIAL_PRICING_ADDONS } from './wedding-data';
+import {
+  PricingPackage,
+  PricingAddon,
+  INITIAL_PRICING_PACKAGES,
+  INITIAL_PRICING_ADDONS,
+} from './wedding-data';
+import {
+  subscribePricingCloud,
+  syncPricingToCloud,
+  syncPricingToCloudDebounced,
+} from './studio-cloud-sync';
 
 const PACKAGES_KEY = 'mmc_pricing_packages_v3';
 const ADDONS_KEY = 'mmc_pricing_addons_v3';
@@ -26,7 +36,7 @@ export function getStoredPricing(): { packages: PricingPackage[]; addons: Pricin
   }
 }
 
-export function savePricing(packages: PricingPackage[], addons: PricingAddon[]): void {
+function persistLocally(packages: PricingPackage[], addons: PricingAddon[]): void {
   if (typeof window === 'undefined') return;
   try {
     localStorage.setItem(PACKAGES_KEY, JSON.stringify(packages));
@@ -37,12 +47,27 @@ export function savePricing(packages: PricingPackage[], addons: PricingAddon[]):
   }
 }
 
+export function savePricing(
+  packages: PricingPackage[],
+  addons: PricingAddon[],
+  immediate = false
+): void {
+  persistLocally(packages, addons);
+  if (immediate) {
+    void syncPricingToCloud(packages).catch(err => {
+      console.error('Failed to sync pricing to cloud:', err);
+    });
+  } else {
+    syncPricingToCloudDebounced(packages);
+  }
+}
+
 export function updatePackage(id: string, updates: Partial<PricingPackage>): boolean {
   const { packages, addons } = getStoredPricing();
   const index = packages.findIndex(p => p.id === id);
   if (index === -1) return false;
-  packages[index] = { ...packages[index], ...updates };
-  savePricing([...packages], addons);
+  const next = packages.map((p, i) => (i === index ? { ...p, ...updates } : p));
+  savePricing(next, addons, false);
   return true;
 }
 
@@ -50,23 +75,42 @@ export function updateAddon(id: string, updates: Partial<PricingAddon>): boolean
   const { packages, addons } = getStoredPricing();
   const index = addons.findIndex(a => a.id === id);
   if (index === -1) return false;
-  addons[index] = { ...addons[index], ...updates };
-  savePricing(packages, [...addons]);
+  const nextAddons = addons.map((a, i) => (i === index ? { ...a, ...updates } : a));
+  savePricing(packages, nextAddons, false);
   return true;
 }
 
 export function resetPricingToDefaults(): void {
-  savePricing(INITIAL_PRICING_PACKAGES, INITIAL_PRICING_ADDONS);
+  savePricing(INITIAL_PRICING_PACKAGES, INITIAL_PRICING_ADDONS, true);
 }
 
 export function usePricing() {
-  const [pricingData, setPricingData] = useState<{ packages: PricingPackage[]; addons: PricingAddon[] }>(getStoredPricing);
+  const [pricingData, setPricingData] = useState<{
+    packages: PricingPackage[];
+    addons: PricingAddon[];
+  }>({ packages: INITIAL_PRICING_PACKAGES, addons: INITIAL_PRICING_ADDONS });
 
   const refresh = useCallback(() => {
     setPricingData(getStoredPricing());
   }, []);
 
   useEffect(() => {
+    let active = true;
+    let receivedCloudData = false;
+
+    void Promise.resolve().then(() => {
+      if (!active || receivedCloudData) return;
+      setPricingData(getStoredPricing());
+    });
+
+    const unsubCloud = subscribePricingCloud(cloudPackages => {
+      if (!active) return;
+      receivedCloudData = true;
+      const currentAddons = getStoredPricing().addons;
+      persistLocally(cloudPackages, currentAddons);
+      setPricingData({ packages: cloudPackages, addons: currentAddons });
+    });
+
     const handleUpdate = () => {
       refresh();
     };
@@ -75,6 +119,8 @@ export function usePricing() {
     window.addEventListener('storage', handleUpdate);
 
     return () => {
+      active = false;
+      unsubCloud();
       window.removeEventListener(CHANGE_EVENT, handleUpdate);
       window.removeEventListener('storage', handleUpdate);
     };
