@@ -28,9 +28,9 @@ service cloud.firestore {
     }
 
     function isBootstrappedAdmin() {
-      return isVerified() && (
-        request.auth.token.email == 'accomplishmarketinglearning@gmail.com' ||
-        request.auth.token.email == 'michael@mmcphotography.co.uk'
+      return isVerified() && request.auth.token.email is string && (
+        request.auth.token.email.lower() == 'accomplishmarketinglearning@gmail.com' ||
+        request.auth.token.email.lower() == 'michael@mmcphotography.co.uk'
       );
     }
 
@@ -246,7 +246,7 @@ service cloud.firestore {
       allow delete: if isValidId(uid) && isBootstrappedAdmin();
     }
 
-    // Public Studio Config Singletons
+    // Public Studio Config Singletons (strictly public portfolio copy, no PII)
     match /studioConfig/about {
       allow get: if true;
       allow create: if isVerified() && isValidAboutConfig(incoming()) && isAdmin();
@@ -268,20 +268,20 @@ service cloud.firestore {
       allow delete: if isVerified() && isAdmin();
     }
 
-    // Public Wedding Gallery Photos
+    // Public Wedding Gallery Photos (non-PII portfolio items)
     match /galleryPhotos/{photoId} {
       allow get: if isValidId(photoId);
-      allow list: if resource.data.id is string;
+      allow list: if true;
       allow create: if isVerified() && isValidId(photoId) && isValidGalleryPhoto(incoming(), photoId) && isAdmin();
       allow update: if isVerified() && isValidId(photoId) && isValidGalleryPhoto(incoming(), photoId) &&
         incoming().id == existing().id && isAdmin();
       allow delete: if isVerified() && isValidId(photoId) && isAdmin();
     }
 
-    // Public Featured Weddings & Subcollection Photos
+    // Public Featured Weddings & Subcollection Photos (non-PII portfolio items)
     match /featuredWeddings/{weddingId} {
       allow get: if isValidId(weddingId);
-      allow list: if resource.data.id is string;
+      allow list: if true;
       allow create: if isVerified() && isValidId(weddingId) && isValidFeaturedWedding(incoming(), weddingId) && isAdmin();
       allow update: if isVerified() && isValidId(weddingId) && isValidFeaturedWedding(incoming(), weddingId) &&
         incoming().id == existing().id && isAdmin();
@@ -289,11 +289,12 @@ service cloud.firestore {
 
       match /photos/{photoId} {
         allow get: if isValidId(weddingId) && isValidId(photoId);
-        allow list: if isValidId(weddingId) && resource.data.weddingId == weddingId;
+        allow list: if isValidId(weddingId);
         allow create: if isVerified() && isValidId(weddingId) && isValidId(photoId) &&
           isValidFeaturedWeddingPhoto(incoming(), weddingId, photoId) &&
           isAdmin() &&
-          existsAfter(/databases/$(database)/documents/featuredWeddings/$(weddingId));
+          (exists(/databases/$(database)/documents/featuredWeddings/$(weddingId)) ||
+           existsAfter(/databases/$(database)/documents/featuredWeddings/$(weddingId)));
         allow update: if isVerified() && isValidId(weddingId) && isValidId(photoId) &&
           isValidFeaturedWeddingPhoto(incoming(), weddingId, photoId) &&
           incoming().id == existing().id &&
@@ -304,40 +305,40 @@ service cloud.firestore {
       }
     }
 
-    // Public FAQs
+    // Public FAQs (non-PII)
     match /faqs/{faqId} {
       allow get: if isValidId(faqId);
-      allow list: if resource.data.id is string;
+      allow list: if true;
       allow create: if isVerified() && isValidId(faqId) && isValidFaq(incoming(), faqId) && isAdmin();
       allow update: if isVerified() && isValidId(faqId) && isValidFaq(incoming(), faqId) &&
         incoming().id == existing().id && isAdmin();
       allow delete: if isVerified() && isValidId(faqId) && isAdmin();
     }
 
-    // Public Reviews (Studio Admin full control)
+    // Public Reviews (non-PII)
     match /reviews/{reviewId} {
       allow get: if isValidId(reviewId);
-      allow list: if resource.data.id is string;
+      allow list: if true;
       allow create: if isVerified() && isValidId(reviewId) && isValidReview(incoming(), reviewId) && isAdmin();
       allow update: if isVerified() && isValidId(reviewId) && isValidReview(incoming(), reviewId) &&
         incoming().id == existing().id && isAdmin();
       allow delete: if isVerified() && isValidId(reviewId) && isAdmin();
     }
 
-    // Public Blog Posts
+    // Public Blog Posts (non-PII)
     match /blogPosts/{postId} {
       allow get: if isValidId(postId);
-      allow list: if resource.data.id is string;
+      allow list: if true;
       allow create: if isVerified() && isValidId(postId) && isValidBlogPost(incoming(), postId) && isAdmin();
       allow update: if isVerified() && isValidId(postId) && isValidBlogPost(incoming(), postId) &&
         incoming().id == existing().id && isAdmin();
       allow delete: if isVerified() && isValidId(postId) && isAdmin();
     }
 
-    // Public Guest Photo Vault Snaps
+    // Public Guest Photo Vault Snaps (non-PII showcase)
     match /vaultPhotos/{photoId} {
       allow get: if isValidId(photoId);
-      allow list: if resource.data.id is string;
+      allow list: if true;
       allow create: if isVerified() && isValidId(photoId) && isValidVaultPhoto(incoming(), photoId) && isAdmin();
       allow update: if isVerified() && isValidId(photoId) && isValidVaultPhoto(incoming(), photoId) &&
         incoming().id == existing().id && isAdmin();

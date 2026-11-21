@@ -169,3 +169,83 @@ export function optimizeUploadedImage(
     reader.readAsDataURL(file);
   });
 }
+
+/**
+ * Ensures an existing data:image/... URL (e.g. uploaded prior to size limits)
+ * fits cleanly within Firestore document byte budgets without corrupting base64.
+ */
+export function compressDataUrlIfNeeded(
+  url: string,
+  maxChars = 350000
+): Promise<string> {
+  if (
+    typeof window === 'undefined' ||
+    !url ||
+    !url.startsWith('data:image/') ||
+    url.length <= maxChars
+  ) {
+    return Promise.resolve(url);
+  }
+
+  return new Promise(resolve => {
+    const img = new window.Image();
+    img.onload = () => {
+      try {
+        const { naturalWidth: width, naturalHeight: height } = img;
+        if (!width || !height) {
+          resolve(url);
+          return;
+        }
+
+        const renderAt = (dim: number, q: number): string => {
+          let targetWidth = width;
+          let targetHeight = height;
+
+          if (width > dim || height > dim) {
+            if (width >= height) {
+              targetWidth = dim;
+              targetHeight = Math.round((height / width) * dim);
+            } else {
+              targetHeight = dim;
+              targetWidth = Math.round((width / height) * dim);
+            }
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = targetWidth;
+          canvas.height = targetHeight;
+
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return url;
+
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, targetWidth, targetHeight);
+          ctx.drawImage(img, 0, 0, targetWidth, targetHeight);
+          return canvas.toDataURL('image/jpeg', q) || url;
+        };
+
+        const attempts: Array<[number, number]> = [
+          [1200, 0.75],
+          [1000, 0.68],
+          [850, 0.6],
+          [680, 0.52],
+          [520, 0.45],
+        ];
+
+        let result = url;
+        for (const [dim, q] of attempts) {
+          result = renderAt(dim, q);
+          if (result.length <= maxChars) {
+            break;
+          }
+        }
+        resolve(result);
+      } catch {
+        resolve(url);
+      }
+    };
+    img.onerror = () => resolve(url);
+    img.src = url;
+  });
+}
+

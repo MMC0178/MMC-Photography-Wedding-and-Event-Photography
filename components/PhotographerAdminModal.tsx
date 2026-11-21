@@ -256,8 +256,19 @@ export default function PhotographerAdminModal({
       showSuccess(customSuccessMsg || 'All changes published live to www.mmcphotography.co.uk!');
     } catch (err) {
       console.error('Failed to publish live changes:', err);
+      let detail = '';
+      if (err instanceof Error && err.message) {
+        try {
+          const parsed = JSON.parse(err.message) as { error?: string; path?: string };
+          detail = [parsed.path ? `(${parsed.path})` : '', parsed.error || ''].filter(Boolean).join(' ');
+        } catch {
+          detail = err.message;
+        }
+      }
       setCloudErrorMsg(
-        'Could not publish to the live cloud database. Please verify you are signed in with your Studio Owner account and try again.'
+        detail
+          ? `Could not publish to the live cloud database: ${detail}`
+          : 'Could not publish to the live cloud database. Please verify you are signed in with your Studio Owner account and try again.'
       );
     } finally {
       setIsPublishingLive(false);

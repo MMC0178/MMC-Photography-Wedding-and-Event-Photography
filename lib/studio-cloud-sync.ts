@@ -7,10 +7,10 @@ import {
   onSnapshot,
   setDoc,
   deleteDoc,
-  writeBatch,
   query,
   orderBy,
 } from 'firebase/firestore';
+import { compressDataUrlIfNeeded } from './studio-storage';
 import {
   auth,
   db,
@@ -607,33 +607,37 @@ export function subscribeVaultCloud(callbacks: {
 async function replaceCollectionDocs<T extends { id: string }>(
   colName: string,
   items: T[],
-  buildPayload: (item: T, sortOrder: number) => Record<string, unknown>
+  buildPayload: (item: T, sortOrder: number) => Promise<Record<string, unknown>> | Record<string, unknown>
 ): Promise<void> {
   if (!canWriteCloud()) return;
   try {
     const existingSnap = await getDocs(collection(db, colName));
     const nextIds = new Set(items.map(item => sanitizeDocId(item.id)));
 
-    const batch = writeBatch(db);
-    existingSnap.docs.forEach(d => {
+    // Delete removed documents first
+    for (const d of existingSnap.docs) {
       if (!nextIds.has(d.id)) {
-        batch.delete(d.ref);
+        await deleteDoc(d.ref);
       }
-    });
+    }
 
-    items.forEach((item, index) => {
+    // Write each document individually so large photo collections never exceed Firestore's 10 MiB batch limit
+    for (let index = 0; index < items.length; index++) {
+      const item = items[index];
       const cleanId = sanitizeDocId(item.id);
-      batch.set(doc(db, colName, cleanId), buildPayload(item, index));
-    });
-
-    await batch.commit();
+      const payload = await buildPayload(item, index);
+      await setDoc(doc(db, colName, cleanId), payload);
+    }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, colName);
   }
 }
 
 export async function syncGalleryPhotosToCloud(photos: GalleryPhoto[]): Promise<void> {
-  await replaceCollectionDocs('galleryPhotos', photos, buildGalleryPhotoPayload);
+  await replaceCollectionDocs('galleryPhotos', photos, async (photo, idx) => {
+    const safeUrl = await compressDataUrlIfNeeded(photo.url, 450000);
+    return buildGalleryPhotoPayload({ ...photo, url: safeUrl }, idx);
+  });
 }
 
 export async function syncFeaturedWeddingsToCloud(weddings: FeaturedWedding[]): Promise<void> {
@@ -643,41 +647,43 @@ export async function syncFeaturedWeddingsToCloud(weddings: FeaturedWedding[]): 
     const existingWeddingsSnap = await getDocs(collection(db, 'featuredWeddings'));
     const nextWeddingIds = new Set(sliced.map(w => sanitizeDocId(w.id)));
 
-    const batch = writeBatch(db);
-    existingWeddingsSnap.docs.forEach(d => {
+    for (const d of existingWeddingsSnap.docs) {
       if (!nextWeddingIds.has(d.id)) {
-        batch.delete(d.ref);
+        await deleteDoc(d.ref);
       }
-    });
+    }
 
     for (let wIdx = 0; wIdx < sliced.length; wIdx++) {
       const wedding = sliced[wIdx];
       const cleanWeddingId = sanitizeDocId(wedding.id);
-      batch.set(
+      const safeCover = await compressDataUrlIfNeeded(wedding.coverImage, 450000);
+
+      // Write parent wedding document first so subcollection exists() rule passes
+      await setDoc(
         doc(db, 'featuredWeddings', cleanWeddingId),
-        buildFeaturedWeddingPayload(wedding, wIdx)
+        buildFeaturedWeddingPayload({ ...wedding, coverImage: safeCover }, wIdx)
       );
 
       const subCol = collection(db, 'featuredWeddings', cleanWeddingId, 'photos');
       const existingPhotosSnap = await getDocs(subCol);
       const nextPhotoIds = new Set(wedding.photos.map(p => sanitizeDocId(p.id)));
 
-      existingPhotosSnap.docs.forEach(pd => {
+      for (const pd of existingPhotosSnap.docs) {
         if (!nextPhotoIds.has(pd.id)) {
-          batch.delete(pd.ref);
+          await deleteDoc(pd.ref);
         }
-      });
+      }
 
-      wedding.photos.forEach((photo, pIdx) => {
+      for (let pIdx = 0; pIdx < wedding.photos.length; pIdx++) {
+        const photo = wedding.photos[pIdx];
         const cleanPhotoId = sanitizeDocId(photo.id);
-        batch.set(
+        const safePhotoUrl = await compressDataUrlIfNeeded(photo.url, 450000);
+        await setDoc(
           doc(db, 'featuredWeddings', cleanWeddingId, 'photos', cleanPhotoId),
-          buildFeaturedWeddingPhotoPayload(cleanWeddingId, photo, pIdx)
+          buildFeaturedWeddingPhotoPayload(cleanWeddingId, { ...photo, url: safePhotoUrl }, pIdx)
         );
-      });
+      }
     }
-
-    await batch.commit();
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, 'featuredWeddings');
   }
@@ -705,7 +711,20 @@ export function syncPricingToCloudDebounced(packages: PricingPackage[]): void {
 export async function syncAboutContentToCloud(about: AboutContent): Promise<void> {
   if (!canWriteCloud()) return;
   try {
-    await setDoc(doc(db, 'studioConfig', 'about'), buildAboutPayload(about));
+    const [safeHero, safeHome, safeStory] = await Promise.all([
+      compressDataUrlIfNeeded(about.homepageHeroImage || INITIAL_ABOUT_CONTENT.homepageHeroImage, 220000),
+      compressDataUrlIfNeeded(about.homepageImage || INITIAL_ABOUT_CONTENT.homepageImage, 220000),
+      compressDataUrlIfNeeded(about.storyImage || INITIAL_ABOUT_CONTENT.storyImage, 220000),
+    ]);
+    await setDoc(
+      doc(db, 'studioConfig', 'about'),
+      buildAboutPayload({
+        ...about,
+        homepageHeroImage: safeHero,
+        homepageImage: safeHome,
+        storyImage: safeStory,
+      })
+    );
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, 'studioConfig/about');
   }
@@ -735,7 +754,10 @@ export function syncReviewsToCloudDebounced(reviews: Review[]): void {
 }
 
 export async function syncBlogPostsToCloud(posts: BlogPost[]): Promise<void> {
-  await replaceCollectionDocs('blogPosts', posts, buildBlogPostPayload);
+  await replaceCollectionDocs('blogPosts', posts, async (post, idx) => {
+    const safeCover = await compressDataUrlIfNeeded(post.coverImage, 450000);
+    return buildBlogPostPayload({ ...post, coverImage: safeCover }, idx);
+  });
 }
 
 export function syncBlogPostsToCloudDebounced(posts: BlogPost[]): void {
@@ -758,7 +780,10 @@ export function syncVaultContentToCloudDebounced(vault: GuestVaultContent): void
 }
 
 export async function syncVaultPhotosToCloud(photos: VaultPhoto[]): Promise<void> {
-  await replaceCollectionDocs('vaultPhotos', photos, buildVaultPhotoPayload);
+  await replaceCollectionDocs('vaultPhotos', photos, async (photo, idx) => {
+    const safeUrl = await compressDataUrlIfNeeded(photo.url, 450000);
+    return buildVaultPhotoPayload({ ...photo, url: safeUrl }, idx);
+  });
 }
 
 export function syncVaultPhotosToCloudDebounced(photos: VaultPhoto[]): void {
@@ -778,7 +803,7 @@ export async function deleteSingleDocCloud(colPath: string, docId: string): Prom
 
 /**
  * Publishes the entire current studio state (homepage, featured weddings, gallery,
- * pricing, about/reviews/blog/faqs, and guest vault) to Cloud Firestore in one shot.
+ * pricing, about/reviews/blog/faqs, and guest vault) to Cloud Firestore.
  */
 export async function publishAllStudioDataToCloud(payload: {
   galleryPhotos: GalleryPhoto[];
@@ -795,19 +820,16 @@ export async function publishAllStudioDataToCloud(payload: {
     throw new Error('Please sign in with your Studio Owner Google account to publish live changes.');
   }
 
-  // Cancel any pending debounced writes since we are doing a full flush
   debounceTimers.forEach(timer => clearTimeout(timer));
   debounceTimers.clear();
 
-  await Promise.all([
-    syncAboutContentToCloud(payload.aboutContent),
-    syncPricingToCloud(payload.pricingPackages),
-    syncVaultContentToCloud(payload.vaultContent),
-    syncGalleryPhotosToCloud(payload.galleryPhotos),
-    syncFeaturedWeddingsToCloud(payload.featuredWeddings),
-    syncFaqsToCloud(payload.faqs),
-    syncReviewsToCloud(payload.reviews),
-    syncBlogPostsToCloud(payload.blogPosts),
-    syncVaultPhotosToCloud(payload.vaultPhotos),
-  ]);
+  await syncAboutContentToCloud(payload.aboutContent);
+  await syncPricingToCloud(payload.pricingPackages);
+  await syncVaultContentToCloud(payload.vaultContent);
+  await syncGalleryPhotosToCloud(payload.galleryPhotos);
+  await syncFeaturedWeddingsToCloud(payload.featuredWeddings);
+  await syncFaqsToCloud(payload.faqs);
+  await syncReviewsToCloud(payload.reviews);
+  await syncBlogPostsToCloud(payload.blogPosts);
+  await syncVaultPhotosToCloud(payload.vaultPhotos);
 }
