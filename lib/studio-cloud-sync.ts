@@ -10,7 +10,7 @@ import {
   query,
   orderBy,
 } from 'firebase/firestore';
-import { compressDataUrlIfNeeded } from './studio-storage';
+import { compressDataUrlIfNeeded, idbGet } from './studio-storage';
 import {
   auth,
   db,
@@ -241,43 +241,123 @@ function buildVaultPhotoPayload(photo: VaultPhoto, sortOrder: number) {
   };
 }
 
-// --- Quota-Friendly One-Time Cloud Hydration (Public Read for ALL website visitors) ---
+// --- Quota-Friendly One-Time Cloud Hydration with Deduplication & 30-Min Cache ---
+
+const CLOUD_SYNC_CACHE_KEY = 'mmc_cloud_sync_ts_v1';
+const CLOUD_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+const inFlightHydrations = new Set<string>();
+const completedHydrationsThisLoad = new Set<string>();
+let quotaExceededThisLoad = false;
+
+function isQuotaExceededError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return (
+    msg.includes('Quota limit exceeded') ||
+    msg.includes('Quota exceeded') ||
+    msg.includes('resource-exhausted')
+  );
+}
+
+function getSectionSyncTimestamp(section: string): number {
+  if (typeof window === 'undefined') return 0;
+  try {
+    const raw = localStorage.getItem(CLOUD_SYNC_CACHE_KEY);
+    if (!raw) return 0;
+    const parsed = JSON.parse(raw) as Record<string, number>;
+    return typeof parsed[section] === 'number' ? parsed[section] : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function markSectionSynced(section: string): void {
+  completedHydrationsThisLoad.add(section);
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = localStorage.getItem(CLOUD_SYNC_CACHE_KEY);
+    const parsed: Record<string, number> = raw ? JSON.parse(raw) : {};
+    parsed[section] = Date.now();
+    localStorage.setItem(CLOUD_SYNC_CACHE_KEY, JSON.stringify(parsed));
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+async function shouldSkipCloudHydration(
+  section: string,
+  hasLocalCachedValue: () => Promise<boolean>
+): Promise<boolean> {
+  if (quotaExceededThisLoad) return true;
+  if (inFlightHydrations.has(section) || completedHydrationsThisLoad.has(section)) {
+    return true;
+  }
+  const lastSyncedAt = getSectionSyncTimestamp(section);
+  if (lastSyncedAt > 0 && Date.now() - lastSyncedAt < CLOUD_CACHE_TTL_MS) {
+    try {
+      if (await hasLocalCachedValue()) {
+        completedHydrationsThisLoad.add(section);
+        return true;
+      }
+    } catch {
+      // Proceed with cloud read if cache check fails
+    }
+  }
+  return false;
+}
 
 export function subscribeGalleryPhotosCloud(
   onData: (photos: GalleryPhoto[]) => void
 ): () => void {
   let active = true;
   const colPath = 'galleryPhotos';
-  const q = query(collection(db, colPath), orderBy('sortOrder', 'asc'));
+  const section = 'galleryPhotos';
 
-  void getDocs(q)
-    .then(snap => {
-      if (!active || snap.empty) return;
-      const items: GalleryPhoto[] = snap.docs
-        .map(d => {
-          const data = d.data();
-          return {
-            id: String(data.id || d.id),
-            url: String(data.url || ''),
-            title: String(data.title || ''),
-            caption: String(data.caption || ''),
-            category: VALID_GALLERY_CATEGORIES.has(data.category)
-              ? data.category
-              : 'bridal-prep',
-          };
-        })
-        .filter(item => item.url.trim().length > 0);
-      if (items.length > 0) {
-        onData(items);
+  void (async () => {
+    const skip = await shouldSkipCloudHydration(section, async () => {
+      const stored = await idbGet<GalleryPhoto[]>('mmc_gallery_photos_v3');
+      return Array.isArray(stored) && stored.length > 0;
+    });
+    if (!active || skip) return;
+
+    inFlightHydrations.add(section);
+    try {
+      const q = query(collection(db, colPath), orderBy('sortOrder', 'asc'));
+      const snap = await getDocs(q);
+      if (!active) return;
+      if (!snap.empty) {
+        const items: GalleryPhoto[] = snap.docs
+          .map(d => {
+            const data = d.data();
+            return {
+              id: String(data.id || d.id),
+              url: String(data.url || ''),
+              title: String(data.title || ''),
+              caption: String(data.caption || ''),
+              category: VALID_GALLERY_CATEGORIES.has(data.category)
+                ? data.category
+                : 'bridal-prep',
+            };
+          })
+          .filter(item => item.url.trim().length > 0);
+        if (items.length > 0) {
+          onData(items);
+        }
       }
-    })
-    .catch(error => {
+      markSectionSynced(section);
+    } catch (error) {
+      if (isQuotaExceededError(error)) {
+        quotaExceededThisLoad = true;
+      }
       try {
         handleFirestoreError(error, OperationType.LIST, colPath);
       } catch {
         // Logged via handleFirestoreError; retain cached/initial UI
       }
-    });
+    } finally {
+      inFlightHydrations.delete(section);
+    }
+  })();
 
   return () => {
     active = false;
@@ -289,65 +369,88 @@ export function subscribeFeaturedWeddingsCloud(
 ): () => void {
   let active = true;
   const colPath = 'featuredWeddings';
-  const q = query(collection(db, colPath), orderBy('sortOrder', 'asc'));
+  const section = 'featuredWeddings';
 
-  void getDocs(q)
-    .then(async snap => {
-      if (!active || snap.empty) return;
+  void (async () => {
+    const skip = await shouldSkipCloudHydration(section, async () => {
+      const stored = await idbGet<FeaturedWedding[]>('mmc_featured_weddings_v3');
+      return Array.isArray(stored) && stored.length > 0;
+    });
+    if (!active || skip) return;
 
-      const results: FeaturedWedding[] = [];
-      const docs = snap.docs.slice(0, 3);
+    inFlightHydrations.add(section);
+    try {
+      const q = query(collection(db, colPath), orderBy('sortOrder', 'asc'));
+      const snap = await getDocs(q);
+      if (!active) return;
 
-      for (const d of docs) {
-        const data = d.data();
-        const id = String(data.id || d.id);
-        let photos: FeaturedWeddingPhoto[] = [];
+      if (!snap.empty) {
+        const results: FeaturedWedding[] = [];
+        const docs = snap.docs.slice(0, 3);
 
-        const subPath = `featuredWeddings/${id}/photos`;
-        try {
-          const psnap = await getDocs(query(collection(db, subPath), orderBy('sortOrder', 'asc')));
-          photos = psnap.docs
-            .map(pd => {
-              const pdata = pd.data();
-              return {
-                id: String(pdata.id || pd.id),
-                url: String(pdata.url || ''),
-                caption: String(pdata.caption || ''),
-              };
-            })
-            .filter(p => p.url.trim().length > 0);
-        } catch (error) {
+        for (const d of docs) {
+          const data = d.data();
+          const id = String(data.id || d.id);
+          let photos: FeaturedWeddingPhoto[] = [];
+
+          const subPath = `featuredWeddings/${id}/photos`;
           try {
-            handleFirestoreError(error, OperationType.LIST, subPath);
-          } catch {
-            // Logged via handleFirestoreError
+            const psnap = await getDocs(query(collection(db, subPath), orderBy('sortOrder', 'asc')));
+            photos = psnap.docs
+              .map(pd => {
+                const pdata = pd.data();
+                return {
+                  id: String(pdata.id || pd.id),
+                  url: String(pdata.url || ''),
+                  caption: String(pdata.caption || ''),
+                };
+              })
+              .filter(p => p.url.trim().length > 0);
+          } catch (error) {
+            if (isQuotaExceededError(error)) {
+              quotaExceededThisLoad = true;
+            }
+            try {
+              handleFirestoreError(error, OperationType.LIST, subPath);
+            } catch {
+              // Logged via handleFirestoreError
+            }
+            if (quotaExceededThisLoad) break;
           }
+
+          results.push({
+            id,
+            couple: String(data.couple || ''),
+            date: String(data.date || ''),
+            venue: String(data.venue || ''),
+            location: String(data.location || ''),
+            coverImage: String(data.coverImage || ''),
+            story: String(data.story || ''),
+            highlightQuote: String(data.highlightQuote || ''),
+            photos,
+          });
         }
 
-        results.push({
-          id,
-          couple: String(data.couple || ''),
-          date: String(data.date || ''),
-          venue: String(data.venue || ''),
-          location: String(data.location || ''),
-          coverImage: String(data.coverImage || ''),
-          story: String(data.story || ''),
-          highlightQuote: String(data.highlightQuote || ''),
-          photos,
-        });
+        if (active && results.length > 0) {
+          onData(results);
+        }
       }
-
-      if (active && results.length > 0) {
-        onData(results);
+      if (!quotaExceededThisLoad) {
+        markSectionSynced(section);
       }
-    })
-    .catch(error => {
+    } catch (error) {
+      if (isQuotaExceededError(error)) {
+        quotaExceededThisLoad = true;
+      }
       try {
         handleFirestoreError(error, OperationType.LIST, colPath);
       } catch {
         // Logged via handleFirestoreError
       }
-    });
+    } finally {
+      inFlightHydrations.delete(section);
+    }
+  })();
 
   return () => {
     active = false;
@@ -359,22 +462,43 @@ export function subscribePricingCloud(
 ): () => void {
   let active = true;
   const docPath = 'studioConfig/pricing';
+  const section = 'pricing';
 
-  void getDoc(doc(db, 'studioConfig', 'pricing'))
-    .then(snap => {
-      if (!active || !snap.exists()) return;
-      const data = snap.data();
-      if (Array.isArray(data.packages) && data.packages.length > 0) {
-        onData(data.packages as PricingPackage[]);
+  void (async () => {
+    const skip = await shouldSkipCloudHydration(section, async () => {
+      try {
+        const raw = localStorage.getItem('mmc_pricing_packages_v3');
+        return Boolean(raw && JSON.parse(raw).length > 0);
+      } catch {
+        return false;
       }
-    })
-    .catch(error => {
+    });
+    if (!active || skip) return;
+
+    inFlightHydrations.add(section);
+    try {
+      const snap = await getDoc(doc(db, 'studioConfig', 'pricing'));
+      if (!active) return;
+      if (snap.exists()) {
+        const data = snap.data();
+        if (Array.isArray(data.packages) && data.packages.length > 0) {
+          onData(data.packages as PricingPackage[]);
+        }
+      }
+      markSectionSynced(section);
+    } catch (error) {
+      if (isQuotaExceededError(error)) {
+        quotaExceededThisLoad = true;
+      }
       try {
         handleFirestoreError(error, OperationType.GET, docPath);
       } catch {
         // Logged via handleFirestoreError
       }
-    });
+    } finally {
+      inFlightHydrations.delete(section);
+    }
+  })();
 
   return () => {
     active = false;
@@ -388,114 +512,148 @@ export function subscribeAboutCloud(callbacks: {
   onBlogPosts: (posts: BlogPost[]) => void;
 }): () => void {
   let active = true;
+  const section = 'aboutBundle';
 
-  void getDoc(doc(db, 'studioConfig', 'about'))
-    .then(snap => {
-      if (!active || !snap.exists()) return;
-      const data = snap.data();
-      callbacks.onAboutContent({
-        ...INITIAL_ABOUT_CONTENT,
-        homepageHeroImage: String(data.homepageHeroImage || INITIAL_ABOUT_CONTENT.homepageHeroImage),
-        homepageTitle: String(data.homepageTitle ?? INITIAL_ABOUT_CONTENT.homepageTitle),
-        homepageText: String(data.homepageText ?? INITIAL_ABOUT_CONTENT.homepageText),
-        homepageImage: String(data.homepageImage || INITIAL_ABOUT_CONTENT.homepageImage),
-        heroKicker: String(data.heroKicker ?? INITIAL_ABOUT_CONTENT.heroKicker),
-        heroHeadline: String(data.heroHeadline ?? INITIAL_ABOUT_CONTENT.heroHeadline),
-        heroQuote: String(data.heroQuote ?? INITIAL_ABOUT_CONTENT.heroQuote),
-        storyImage: String(data.storyImage || INITIAL_ABOUT_CONTENT.storyImage),
-        storyTitle: String(data.storyTitle ?? INITIAL_ABOUT_CONTENT.storyTitle),
-        storyParagraphs: Array.isArray(data.storyParagraphs)
-          ? data.storyParagraphs.map(String)
-          : INITIAL_ABOUT_CONTENT.storyParagraphs,
-        coreValues: Array.isArray(data.coreValues)
-          ? data.coreValues
-          : INITIAL_ABOUT_CONTENT.coreValues,
-      });
-    })
-    .catch(error => {
-      try {
-        handleFirestoreError(error, OperationType.GET, 'studioConfig/about');
-      } catch {
-        // Logged via handleFirestoreError
-      }
+  void (async () => {
+    const skip = await shouldSkipCloudHydration(section, async () => {
+      const stored = await idbGet<{ aboutContent?: AboutContent }>('mmc_about_bundle_v1');
+      return Boolean(stored && stored.aboutContent);
     });
+    if (!active || skip) return;
 
-  void getDocs(query(collection(db, 'faqs'), orderBy('sortOrder', 'asc')))
-    .then(snap => {
-      if (!active || snap.empty) return;
-      callbacks.onFaqs(
-        snap.docs.map(d => {
-          const data = d.data();
-          return {
-            id: String(data.id || d.id),
-            q: String(data.q || ''),
-            a: String(data.a || ''),
-          };
-        })
-      );
-    })
-    .catch(error => {
-      try {
-        handleFirestoreError(error, OperationType.LIST, 'faqs');
-      } catch {
-        // Logged via handleFirestoreError
-      }
-    });
+    inFlightHydrations.add(section);
+    try {
+      let hadError = false;
 
-  void getDocs(query(collection(db, 'reviews'), orderBy('sortOrder', 'asc')))
-    .then(snap => {
-      if (!active || snap.empty) return;
-      callbacks.onReviews(
-        snap.docs.map(d => {
-          const data = d.data();
-          return {
-            id: String(data.id || d.id),
-            couple: String(data.couple || ''),
-            date: String(data.date || ''),
-            venue: String(data.venue || ''),
-            rating: Number(data.rating || 5),
-            snippet: String(data.snippet || ''),
-            fullReview: String(data.fullReview || ''),
-            highlight: String(data.highlight || ''),
-          };
-        })
-      );
-    })
-    .catch(error => {
       try {
-        handleFirestoreError(error, OperationType.LIST, 'reviews');
-      } catch {
-        // Logged via handleFirestoreError
+        const snap = await getDoc(doc(db, 'studioConfig', 'about'));
+        if (active && snap.exists()) {
+          const data = snap.data();
+          callbacks.onAboutContent({
+            ...INITIAL_ABOUT_CONTENT,
+            homepageHeroImage: String(data.homepageHeroImage || INITIAL_ABOUT_CONTENT.homepageHeroImage),
+            homepageTitle: String(data.homepageTitle ?? INITIAL_ABOUT_CONTENT.homepageTitle),
+            homepageText: String(data.homepageText ?? INITIAL_ABOUT_CONTENT.homepageText),
+            homepageImage: String(data.homepageImage || INITIAL_ABOUT_CONTENT.homepageImage),
+            heroKicker: String(data.heroKicker ?? INITIAL_ABOUT_CONTENT.heroKicker),
+            heroHeadline: String(data.heroHeadline ?? INITIAL_ABOUT_CONTENT.heroHeadline),
+            heroQuote: String(data.heroQuote ?? INITIAL_ABOUT_CONTENT.heroQuote),
+            storyImage: String(data.storyImage || INITIAL_ABOUT_CONTENT.storyImage),
+            storyTitle: String(data.storyTitle ?? INITIAL_ABOUT_CONTENT.storyTitle),
+            storyParagraphs: Array.isArray(data.storyParagraphs)
+              ? data.storyParagraphs.map(String)
+              : INITIAL_ABOUT_CONTENT.storyParagraphs,
+            coreValues: Array.isArray(data.coreValues)
+              ? data.coreValues
+              : INITIAL_ABOUT_CONTENT.coreValues,
+          });
+        }
+      } catch (error) {
+        hadError = true;
+        if (isQuotaExceededError(error)) quotaExceededThisLoad = true;
+        try {
+          handleFirestoreError(error, OperationType.GET, 'studioConfig/about');
+        } catch {
+          // Logged via handleFirestoreError
+        }
       }
-    });
 
-  void getDocs(query(collection(db, 'blogPosts'), orderBy('sortOrder', 'asc')))
-    .then(snap => {
-      if (!active || snap.empty) return;
-      callbacks.onBlogPosts(
-        snap.docs.map(d => {
-          const data = d.data();
-          return {
-            id: String(data.id || d.id),
-            slug: String(data.slug || d.id),
-            title: String(data.title || ''),
-            date: String(data.date || ''),
-            category: String(data.category || ''),
-            readTime: String(data.readTime || ''),
-            coverImage: String(data.coverImage || ''),
-            excerpt: String(data.excerpt || ''),
-            content: Array.isArray(data.content) ? data.content.map(String) : [],
-          };
-        })
-      );
-    })
-    .catch(error => {
+      if (!active || quotaExceededThisLoad) return;
+
       try {
-        handleFirestoreError(error, OperationType.LIST, 'blogPosts');
-      } catch {
-        // Logged via handleFirestoreError
+        const snap = await getDocs(query(collection(db, 'faqs'), orderBy('sortOrder', 'asc')));
+        if (active && !snap.empty) {
+          callbacks.onFaqs(
+            snap.docs.map(d => {
+              const data = d.data();
+              return {
+                id: String(data.id || d.id),
+                q: String(data.q || ''),
+                a: String(data.a || ''),
+              };
+            })
+          );
+        }
+      } catch (error) {
+        hadError = true;
+        if (isQuotaExceededError(error)) quotaExceededThisLoad = true;
+        try {
+          handleFirestoreError(error, OperationType.LIST, 'faqs');
+        } catch {
+          // Logged via handleFirestoreError
+        }
       }
-    });
+
+      if (!active || quotaExceededThisLoad) return;
+
+      try {
+        const snap = await getDocs(query(collection(db, 'reviews'), orderBy('sortOrder', 'asc')));
+        if (active && !snap.empty) {
+          callbacks.onReviews(
+            snap.docs.map(d => {
+              const data = d.data();
+              return {
+                id: String(data.id || d.id),
+                couple: String(data.couple || ''),
+                date: String(data.date || ''),
+                venue: String(data.venue || ''),
+                rating: Number(data.rating || 5),
+                snippet: String(data.snippet || ''),
+                fullReview: String(data.fullReview || ''),
+                highlight: String(data.highlight || ''),
+              };
+            })
+          );
+        }
+      } catch (error) {
+        hadError = true;
+        if (isQuotaExceededError(error)) quotaExceededThisLoad = true;
+        try {
+          handleFirestoreError(error, OperationType.LIST, 'reviews');
+        } catch {
+          // Logged via handleFirestoreError
+        }
+      }
+
+      if (!active || quotaExceededThisLoad) return;
+
+      try {
+        const snap = await getDocs(query(collection(db, 'blogPosts'), orderBy('sortOrder', 'asc')));
+        if (active && !snap.empty) {
+          callbacks.onBlogPosts(
+            snap.docs.map(d => {
+              const data = d.data();
+              return {
+                id: String(data.id || d.id),
+                slug: String(data.slug || d.id),
+                title: String(data.title || ''),
+                date: String(data.date || ''),
+                category: String(data.category || ''),
+                readTime: String(data.readTime || ''),
+                coverImage: String(data.coverImage || ''),
+                excerpt: String(data.excerpt || ''),
+                content: Array.isArray(data.content) ? data.content.map(String) : [],
+              };
+            })
+          );
+        }
+      } catch (error) {
+        hadError = true;
+        if (isQuotaExceededError(error)) quotaExceededThisLoad = true;
+        try {
+          handleFirestoreError(error, OperationType.LIST, 'blogPosts');
+        } catch {
+          // Logged via handleFirestoreError
+        }
+      }
+
+      if (!hadError && !quotaExceededThisLoad) {
+        markSectionSynced(section);
+      }
+    } finally {
+      inFlightHydrations.delete(section);
+    }
+  })();
 
   return () => {
     active = false;
@@ -507,61 +665,87 @@ export function subscribeVaultCloud(callbacks: {
   onVaultPhotos: (photos: VaultPhoto[]) => void;
 }): () => void {
   let active = true;
+  const section = 'vaultBundle';
 
-  void getDoc(doc(db, 'studioConfig', 'vault'))
-    .then(snap => {
-      if (!active || !snap.exists()) return;
-      const data = snap.data();
-      callbacks.onVaultContent({
-        ...INITIAL_VAULT_CONTENT,
-        badgeLabel: String(data.badgeLabel ?? INITIAL_VAULT_CONTENT.badgeLabel),
-        pageTitle: String(data.pageTitle ?? INITIAL_VAULT_CONTENT.pageTitle),
-        pageSubtitle: String(data.pageSubtitle ?? INITIAL_VAULT_CONTENT.pageSubtitle),
-        coupleName: String(data.coupleName ?? INITIAL_VAULT_CONTENT.coupleName),
-        weddingDate: String(data.weddingDate ?? INITIAL_VAULT_CONTENT.weddingDate),
-        streamTitle: String(data.streamTitle ?? INITIAL_VAULT_CONTENT.streamTitle),
-        streamSubtitle: String(data.streamSubtitle ?? INITIAL_VAULT_CONTENT.streamSubtitle),
-        privacyBadgeText: String(data.privacyBadgeText ?? INITIAL_VAULT_CONTENT.privacyBadgeText),
-        howItWorksSteps: Array.isArray(data.howItWorksSteps)
-          ? data.howItWorksSteps
-          : INITIAL_VAULT_CONTENT.howItWorksSteps,
-      });
-    })
-    .catch(error => {
-      try {
-        handleFirestoreError(error, OperationType.GET, 'studioConfig/vault');
-      } catch {
-        // Logged via handleFirestoreError
-      }
+  void (async () => {
+    const skip = await shouldSkipCloudHydration(section, async () => {
+      const stored = await idbGet<{ vaultContent?: GuestVaultContent }>('mmc_vault_bundle_v1');
+      return Boolean(stored && stored.vaultContent);
     });
+    if (!active || skip) return;
 
-  void getDocs(query(collection(db, 'vaultPhotos'), orderBy('sortOrder', 'asc')))
-    .then(snap => {
-      if (!active || snap.empty) return;
-      const items: VaultPhoto[] = snap.docs
-        .map(d => {
-          const data = d.data();
-          return {
-            id: String(data.id || d.id),
-            guestName: String(data.guestName || ''),
-            table: String(data.table || ''),
-            note: String(data.note || ''),
-            time: String(data.time || ''),
-            url: String(data.url || ''),
-          };
-        })
-        .filter(item => item.url.trim().length > 0);
-      if (items.length > 0) {
-        callbacks.onVaultPhotos(items);
-      }
-    })
-    .catch(error => {
+    inFlightHydrations.add(section);
+    try {
+      let hadError = false;
+
       try {
-        handleFirestoreError(error, OperationType.LIST, 'vaultPhotos');
-      } catch {
-        // Logged via handleFirestoreError
+        const snap = await getDoc(doc(db, 'studioConfig', 'vault'));
+        if (active && snap.exists()) {
+          const data = snap.data();
+          callbacks.onVaultContent({
+            ...INITIAL_VAULT_CONTENT,
+            badgeLabel: String(data.badgeLabel ?? INITIAL_VAULT_CONTENT.badgeLabel),
+            pageTitle: String(data.pageTitle ?? INITIAL_VAULT_CONTENT.pageTitle),
+            pageSubtitle: String(data.pageSubtitle ?? INITIAL_VAULT_CONTENT.pageSubtitle),
+            coupleName: String(data.coupleName ?? INITIAL_VAULT_CONTENT.coupleName),
+            weddingDate: String(data.weddingDate ?? INITIAL_VAULT_CONTENT.weddingDate),
+            streamTitle: String(data.streamTitle ?? INITIAL_VAULT_CONTENT.streamTitle),
+            streamSubtitle: String(data.streamSubtitle ?? INITIAL_VAULT_CONTENT.streamSubtitle),
+            privacyBadgeText: String(data.privacyBadgeText ?? INITIAL_VAULT_CONTENT.privacyBadgeText),
+            howItWorksSteps: Array.isArray(data.howItWorksSteps)
+              ? data.howItWorksSteps
+              : INITIAL_VAULT_CONTENT.howItWorksSteps,
+          });
+        }
+      } catch (error) {
+        hadError = true;
+        if (isQuotaExceededError(error)) quotaExceededThisLoad = true;
+        try {
+          handleFirestoreError(error, OperationType.GET, 'studioConfig/vault');
+        } catch {
+          // Logged via handleFirestoreError
+        }
       }
-    });
+
+      if (!active || quotaExceededThisLoad) return;
+
+      try {
+        const snap = await getDocs(query(collection(db, 'vaultPhotos'), orderBy('sortOrder', 'asc')));
+        if (active && !snap.empty) {
+          const items: VaultPhoto[] = snap.docs
+            .map(d => {
+              const data = d.data();
+              return {
+                id: String(data.id || d.id),
+                guestName: String(data.guestName || ''),
+                table: String(data.table || ''),
+                note: String(data.note || ''),
+                time: String(data.time || ''),
+                url: String(data.url || ''),
+              };
+            })
+            .filter(item => item.url.trim().length > 0);
+          if (items.length > 0) {
+            callbacks.onVaultPhotos(items);
+          }
+        }
+      } catch (error) {
+        hadError = true;
+        if (isQuotaExceededError(error)) quotaExceededThisLoad = true;
+        try {
+          handleFirestoreError(error, OperationType.LIST, 'vaultPhotos');
+        } catch {
+          // Logged via handleFirestoreError
+        }
+      }
+
+      if (!hadError && !quotaExceededThisLoad) {
+        markSectionSynced(section);
+      }
+    } finally {
+      inFlightHydrations.delete(section);
+    }
+  })();
 
   return () => {
     active = false;
@@ -840,4 +1024,11 @@ export async function publishAllStudioDataToCloud(
 
   onProgress?.('Publishing Guest Vault Photos...');
   await syncVaultPhotosToCloud(payload.vaultPhotos);
+
+  // Mark all sections freshly synced so immediate reloads use local IndexedDB cache
+  markSectionSynced('aboutBundle');
+  markSectionSynced('pricing');
+  markSectionSynced('vaultBundle');
+  markSectionSynced('galleryPhotos');
+  markSectionSynced('featuredWeddings');
 }
