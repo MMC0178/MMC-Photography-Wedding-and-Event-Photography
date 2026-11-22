@@ -225,11 +225,12 @@ export function compressDataUrlIfNeeded(
         };
 
         const attempts: Array<[number, number]> = [
-          [1200, 0.75],
-          [1000, 0.68],
-          [850, 0.6],
-          [680, 0.52],
-          [520, 0.45],
+          [1100, 0.72],
+          [900, 0.65],
+          [760, 0.58],
+          [640, 0.5],
+          [500, 0.44],
+          [400, 0.38],
         ];
 
         let result = url;

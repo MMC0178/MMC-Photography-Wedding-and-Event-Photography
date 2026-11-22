@@ -117,7 +117,7 @@ async function testConnection() {
   if (typeof window === 'undefined' || connectionChecked) return;
   connectionChecked = true;
   try {
-    await getDocFromServer(doc(db, 'studioConfig', 'about'));
+    await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
       console.error('Please check your Firebase configuration.');

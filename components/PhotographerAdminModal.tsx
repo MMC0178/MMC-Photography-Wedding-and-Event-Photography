@@ -186,6 +186,7 @@ export default function PhotographerAdminModal({
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isPublishingLive, setIsPublishingLive] = useState(false);
+  const [publishProgressMsg, setPublishProgressMsg] = useState('');
   const [cloudErrorMsg, setCloudErrorMsg] = useState('');
 
   useEffect(() => {
@@ -240,19 +241,23 @@ export default function PhotographerAdminModal({
       return;
     }
     setIsPublishingLive(true);
+    setPublishProgressMsg('Starting live sync...');
     setCloudErrorMsg('');
     try {
-      await publishAllStudioDataToCloud({
-        galleryPhotos,
-        featuredWeddings,
-        pricingPackages,
-        aboutContent,
-        faqs,
-        reviews,
-        blogPosts,
-        vaultContent,
-        vaultPhotos,
-      });
+      await publishAllStudioDataToCloud(
+        {
+          galleryPhotos,
+          featuredWeddings,
+          pricingPackages,
+          aboutContent,
+          faqs,
+          reviews,
+          blogPosts,
+          vaultContent,
+          vaultPhotos,
+        },
+        status => setPublishProgressMsg(status)
+      );
       showSuccess(customSuccessMsg || 'All changes published live to www.mmcphotography.co.uk!');
     } catch (err) {
       console.error('Failed to publish live changes:', err);
@@ -264,14 +269,17 @@ export default function PhotographerAdminModal({
         } catch {
           detail = err.message;
         }
+      } else if (err) {
+        detail = String(err);
       }
       setCloudErrorMsg(
         detail
           ? `Could not publish to the live cloud database: ${detail}`
-          : 'Could not publish to the live cloud database. Please verify you are signed in with your Studio Owner account and try again.'
+          : 'Could not publish to the live cloud database. Please refresh the page, verify you are signed in with your Studio Owner account, and try again.'
       );
     } finally {
       setIsPublishingLive(false);
+      setPublishProgressMsg('');
     }
   };
 
@@ -527,7 +535,7 @@ export default function PhotographerAdminModal({
                   disabled={isPublishingLive}
                   className="bg-[#1e2321] hover:bg-stone-800 text-white px-3.5 py-1.5 rounded text-[11px] uppercase tracking-wider font-sans font-semibold transition-colors disabled:opacity-50"
                 >
-                  {isPublishingLive ? 'Publishing...' : 'Publish All Changes Live'}
+                  {isPublishingLive ? publishProgressMsg || 'Publishing...' : 'Publish All Changes Live'}
                 </button>
                 <button
                   type="button"

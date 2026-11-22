@@ -3,8 +3,8 @@
 import {
   collection,
   doc,
+  getDoc,
   getDocs,
-  onSnapshot,
   setDoc,
   deleteDoc,
   query,
@@ -51,7 +51,7 @@ function canWriteCloud(): boolean {
 // Debounce timers for rapid typing updates
 const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-function scheduleDebouncedWrite(key: string, fn: () => Promise<void>, delayMs = 450) {
+function scheduleDebouncedWrite(key: string, fn: () => Promise<void>, delayMs = 600) {
   const existingTimer = debounceTimers.get(key);
   if (existingTimer) {
     clearTimeout(existingTimer);
@@ -241,169 +241,144 @@ function buildVaultPhotoPayload(photo: VaultPhoto, sortOrder: number) {
   };
 }
 
-// --- Real-time Subscriptions (Public Read for ALL website visitors) ---
+// --- Quota-Friendly One-Time Cloud Hydration (Public Read for ALL website visitors) ---
 
 export function subscribeGalleryPhotosCloud(
   onData: (photos: GalleryPhoto[]) => void
 ): () => void {
+  let active = true;
   const colPath = 'galleryPhotos';
   const q = query(collection(db, colPath), orderBy('sortOrder', 'asc'));
-  return onSnapshot(
-    q,
-    snap => {
-      if (snap.empty) return;
-      const items: GalleryPhoto[] = snap.docs.map(d => {
-        const data = d.data();
-        return {
-          id: String(data.id || d.id),
-          url: String(data.url || ''),
-          title: String(data.title || ''),
-          caption: String(data.caption || ''),
-          category: VALID_GALLERY_CATEGORIES.has(data.category)
-            ? data.category
-            : 'bridal-prep',
-        };
-      });
-      onData(items);
-    },
-    error => {
+
+  void getDocs(q)
+    .then(snap => {
+      if (!active || snap.empty) return;
+      const items: GalleryPhoto[] = snap.docs
+        .map(d => {
+          const data = d.data();
+          return {
+            id: String(data.id || d.id),
+            url: String(data.url || ''),
+            title: String(data.title || ''),
+            caption: String(data.caption || ''),
+            category: VALID_GALLERY_CATEGORIES.has(data.category)
+              ? data.category
+              : 'bridal-prep',
+          };
+        })
+        .filter(item => item.url.trim().length > 0);
+      if (items.length > 0) {
+        onData(items);
+      }
+    })
+    .catch(error => {
       try {
         handleFirestoreError(error, OperationType.LIST, colPath);
       } catch {
         // Logged via handleFirestoreError; retain cached/initial UI
       }
-    }
-  );
+    });
+
+  return () => {
+    active = false;
+  };
 }
 
 export function subscribeFeaturedWeddingsCloud(
   onData: (weddings: FeaturedWedding[]) => void
 ): () => void {
+  let active = true;
   const colPath = 'featuredWeddings';
   const q = query(collection(db, colPath), orderBy('sortOrder', 'asc'));
-  const photoUnsubs = new Map<string, () => void>();
-  const weddingMap = new Map<string, { sortOrder: number; wedding: FeaturedWedding }>();
-  const photosByWedding = new Map<string, FeaturedWeddingPhoto[]>();
 
-  const emit = () => {
-    if (weddingMap.size === 0) return;
-    const ordered = Array.from(weddingMap.values())
-      .sort((a, b) => a.sortOrder - b.sortOrder)
-      .slice(0, 3)
-      .map(entry => ({
-        ...entry.wedding,
-        photos: photosByWedding.get(entry.wedding.id) || entry.wedding.photos || [],
-      }));
-    onData(ordered);
-  };
+  void getDocs(q)
+    .then(async snap => {
+      if (!active || snap.empty) return;
 
-  const unsubWeddings = onSnapshot(
-    q,
-    snap => {
-      if (snap.empty) return;
-      const seenIds = new Set<string>();
+      const results: FeaturedWedding[] = [];
+      const docs = snap.docs.slice(0, 3);
 
-      snap.docs.forEach((d, idx) => {
+      for (const d of docs) {
         const data = d.data();
         const id = String(data.id || d.id);
-        seenIds.add(id);
+        let photos: FeaturedWeddingPhoto[] = [];
 
-        weddingMap.set(id, {
-          sortOrder: typeof data.sortOrder === 'number' ? data.sortOrder : idx,
-          wedding: {
-            id,
-            couple: String(data.couple || ''),
-            date: String(data.date || ''),
-            venue: String(data.venue || ''),
-            location: String(data.location || ''),
-            coverImage: String(data.coverImage || ''),
-            story: String(data.story || ''),
-            highlightQuote: String(data.highlightQuote || ''),
-            photos: photosByWedding.get(id) || [],
-          },
-        });
-
-        if (!photoUnsubs.has(id)) {
-          const subPath = `featuredWeddings/${id}/photos`;
-          const pq = query(collection(db, subPath), orderBy('sortOrder', 'asc'));
-          const unsubSub = onSnapshot(
-            pq,
-            psnap => {
-              const pItems: FeaturedWeddingPhoto[] = psnap.docs.map(pd => {
-                const pdata = pd.data();
-                return {
-                  id: String(pdata.id || pd.id),
-                  url: String(pdata.url || ''),
-                  caption: String(pdata.caption || ''),
-                };
-              });
-              photosByWedding.set(id, pItems);
-              emit();
-            },
-            error => {
-              try {
-                handleFirestoreError(error, OperationType.LIST, subPath);
-              } catch {
-                // Logged via handleFirestoreError
-              }
-            }
-          );
-          photoUnsubs.set(id, unsubSub);
-        }
-      });
-
-      // Clean up removed weddings
-      for (const existingId of Array.from(weddingMap.keys())) {
-        if (!seenIds.has(existingId)) {
-          weddingMap.delete(existingId);
-          photosByWedding.delete(existingId);
-          const unsub = photoUnsubs.get(existingId);
-          if (unsub) {
-            unsub();
-            photoUnsubs.delete(existingId);
+        const subPath = `featuredWeddings/${id}/photos`;
+        try {
+          const psnap = await getDocs(query(collection(db, subPath), orderBy('sortOrder', 'asc')));
+          photos = psnap.docs
+            .map(pd => {
+              const pdata = pd.data();
+              return {
+                id: String(pdata.id || pd.id),
+                url: String(pdata.url || ''),
+                caption: String(pdata.caption || ''),
+              };
+            })
+            .filter(p => p.url.trim().length > 0);
+        } catch (error) {
+          try {
+            handleFirestoreError(error, OperationType.LIST, subPath);
+          } catch {
+            // Logged via handleFirestoreError
           }
         }
+
+        results.push({
+          id,
+          couple: String(data.couple || ''),
+          date: String(data.date || ''),
+          venue: String(data.venue || ''),
+          location: String(data.location || ''),
+          coverImage: String(data.coverImage || ''),
+          story: String(data.story || ''),
+          highlightQuote: String(data.highlightQuote || ''),
+          photos,
+        });
       }
 
-      emit();
-    },
-    error => {
+      if (active && results.length > 0) {
+        onData(results);
+      }
+    })
+    .catch(error => {
       try {
         handleFirestoreError(error, OperationType.LIST, colPath);
       } catch {
         // Logged via handleFirestoreError
       }
-    }
-  );
+    });
 
   return () => {
-    unsubWeddings();
-    photoUnsubs.forEach(unsub => unsub());
-    photoUnsubs.clear();
+    active = false;
   };
 }
 
 export function subscribePricingCloud(
   onData: (packages: PricingPackage[]) => void
 ): () => void {
+  let active = true;
   const docPath = 'studioConfig/pricing';
-  return onSnapshot(
-    doc(db, 'studioConfig', 'pricing'),
-    snap => {
-      if (!snap.exists()) return;
+
+  void getDoc(doc(db, 'studioConfig', 'pricing'))
+    .then(snap => {
+      if (!active || !snap.exists()) return;
       const data = snap.data();
       if (Array.isArray(data.packages) && data.packages.length > 0) {
         onData(data.packages as PricingPackage[]);
       }
-    },
-    error => {
+    })
+    .catch(error => {
       try {
         handleFirestoreError(error, OperationType.GET, docPath);
       } catch {
         // Logged via handleFirestoreError
       }
-    }
-  );
+    });
+
+  return () => {
+    active = false;
+  };
 }
 
 export function subscribeAboutCloud(callbacks: {
@@ -412,10 +387,11 @@ export function subscribeAboutCloud(callbacks: {
   onReviews: (reviews: Review[]) => void;
   onBlogPosts: (posts: BlogPost[]) => void;
 }): () => void {
-  const unsubAbout = onSnapshot(
-    doc(db, 'studioConfig', 'about'),
-    snap => {
-      if (!snap.exists()) return;
+  let active = true;
+
+  void getDoc(doc(db, 'studioConfig', 'about'))
+    .then(snap => {
+      if (!active || !snap.exists()) return;
       const data = snap.data();
       callbacks.onAboutContent({
         ...INITIAL_ABOUT_CONTENT,
@@ -435,20 +411,18 @@ export function subscribeAboutCloud(callbacks: {
           ? data.coreValues
           : INITIAL_ABOUT_CONTENT.coreValues,
       });
-    },
-    error => {
+    })
+    .catch(error => {
       try {
         handleFirestoreError(error, OperationType.GET, 'studioConfig/about');
       } catch {
         // Logged via handleFirestoreError
       }
-    }
-  );
+    });
 
-  const unsubFaqs = onSnapshot(
-    query(collection(db, 'faqs'), orderBy('sortOrder', 'asc')),
-    snap => {
-      if (snap.empty) return;
+  void getDocs(query(collection(db, 'faqs'), orderBy('sortOrder', 'asc')))
+    .then(snap => {
+      if (!active || snap.empty) return;
       callbacks.onFaqs(
         snap.docs.map(d => {
           const data = d.data();
@@ -459,20 +433,18 @@ export function subscribeAboutCloud(callbacks: {
           };
         })
       );
-    },
-    error => {
+    })
+    .catch(error => {
       try {
         handleFirestoreError(error, OperationType.LIST, 'faqs');
       } catch {
         // Logged via handleFirestoreError
       }
-    }
-  );
+    });
 
-  const unsubReviews = onSnapshot(
-    query(collection(db, 'reviews'), orderBy('sortOrder', 'asc')),
-    snap => {
-      if (snap.empty) return;
+  void getDocs(query(collection(db, 'reviews'), orderBy('sortOrder', 'asc')))
+    .then(snap => {
+      if (!active || snap.empty) return;
       callbacks.onReviews(
         snap.docs.map(d => {
           const data = d.data();
@@ -488,20 +460,18 @@ export function subscribeAboutCloud(callbacks: {
           };
         })
       );
-    },
-    error => {
+    })
+    .catch(error => {
       try {
         handleFirestoreError(error, OperationType.LIST, 'reviews');
       } catch {
         // Logged via handleFirestoreError
       }
-    }
-  );
+    });
 
-  const unsubBlogs = onSnapshot(
-    query(collection(db, 'blogPosts'), orderBy('sortOrder', 'asc')),
-    snap => {
-      if (snap.empty) return;
+  void getDocs(query(collection(db, 'blogPosts'), orderBy('sortOrder', 'asc')))
+    .then(snap => {
+      if (!active || snap.empty) return;
       callbacks.onBlogPosts(
         snap.docs.map(d => {
           const data = d.data();
@@ -518,21 +488,17 @@ export function subscribeAboutCloud(callbacks: {
           };
         })
       );
-    },
-    error => {
+    })
+    .catch(error => {
       try {
         handleFirestoreError(error, OperationType.LIST, 'blogPosts');
       } catch {
         // Logged via handleFirestoreError
       }
-    }
-  );
+    });
 
   return () => {
-    unsubAbout();
-    unsubFaqs();
-    unsubReviews();
-    unsubBlogs();
+    active = false;
   };
 }
 
@@ -540,10 +506,11 @@ export function subscribeVaultCloud(callbacks: {
   onVaultContent: (vault: GuestVaultContent) => void;
   onVaultPhotos: (photos: VaultPhoto[]) => void;
 }): () => void {
-  const unsubConfig = onSnapshot(
-    doc(db, 'studioConfig', 'vault'),
-    snap => {
-      if (!snap.exists()) return;
+  let active = true;
+
+  void getDoc(doc(db, 'studioConfig', 'vault'))
+    .then(snap => {
+      if (!active || !snap.exists()) return;
       const data = snap.data();
       callbacks.onVaultContent({
         ...INITIAL_VAULT_CONTENT,
@@ -559,22 +526,20 @@ export function subscribeVaultCloud(callbacks: {
           ? data.howItWorksSteps
           : INITIAL_VAULT_CONTENT.howItWorksSteps,
       });
-    },
-    error => {
+    })
+    .catch(error => {
       try {
         handleFirestoreError(error, OperationType.GET, 'studioConfig/vault');
       } catch {
         // Logged via handleFirestoreError
       }
-    }
-  );
+    });
 
-  const unsubPhotos = onSnapshot(
-    query(collection(db, 'vaultPhotos'), orderBy('sortOrder', 'asc')),
-    snap => {
-      if (snap.empty) return;
-      callbacks.onVaultPhotos(
-        snap.docs.map(d => {
+  void getDocs(query(collection(db, 'vaultPhotos'), orderBy('sortOrder', 'asc')))
+    .then(snap => {
+      if (!active || snap.empty) return;
+      const items: VaultPhoto[] = snap.docs
+        .map(d => {
           const data = d.data();
           return {
             id: String(data.id || d.id),
@@ -585,20 +550,21 @@ export function subscribeVaultCloud(callbacks: {
             url: String(data.url || ''),
           };
         })
-      );
-    },
-    error => {
+        .filter(item => item.url.trim().length > 0);
+      if (items.length > 0) {
+        callbacks.onVaultPhotos(items);
+      }
+    })
+    .catch(error => {
       try {
         handleFirestoreError(error, OperationType.LIST, 'vaultPhotos');
       } catch {
         // Logged via handleFirestoreError
       }
-    }
-  );
+    });
 
   return () => {
-    unsubConfig();
-    unsubPhotos();
+    active = false;
   };
 }
 
@@ -607,40 +573,52 @@ export function subscribeVaultCloud(callbacks: {
 async function replaceCollectionDocs<T extends { id: string }>(
   colName: string,
   items: T[],
-  buildPayload: (item: T, sortOrder: number) => Promise<Record<string, unknown>> | Record<string, unknown>
+  buildPayload: (item: T, sortOrder: number) => Promise<Record<string, unknown>> | Record<string, unknown>,
+  onItemProgress?: (current: number, total: number) => void
 ): Promise<void> {
   if (!canWriteCloud()) return;
   try {
     const existingSnap = await getDocs(collection(db, colName));
     const nextIds = new Set(items.map(item => sanitizeDocId(item.id)));
 
-    // Delete removed documents first
     for (const d of existingSnap.docs) {
       if (!nextIds.has(d.id)) {
         await deleteDoc(d.ref);
       }
     }
 
-    // Write each document individually so large photo collections never exceed Firestore's 10 MiB batch limit
     for (let index = 0; index < items.length; index++) {
       const item = items[index];
       const cleanId = sanitizeDocId(item.id);
       const payload = await buildPayload(item, index);
       await setDoc(doc(db, colName, cleanId), payload);
+      onItemProgress?.(index + 1, items.length);
     }
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, colName);
   }
 }
 
-export async function syncGalleryPhotosToCloud(photos: GalleryPhoto[]): Promise<void> {
-  await replaceCollectionDocs('galleryPhotos', photos, async (photo, idx) => {
-    const safeUrl = await compressDataUrlIfNeeded(photo.url, 450000);
-    return buildGalleryPhotoPayload({ ...photo, url: safeUrl }, idx);
-  });
+export async function syncGalleryPhotosToCloud(
+  photos: GalleryPhoto[],
+  onProgress?: (current: number, total: number) => void
+): Promise<void> {
+  const validPhotos = photos.filter(p => typeof p.url === 'string' && p.url.trim().length > 0);
+  await replaceCollectionDocs(
+    'galleryPhotos',
+    validPhotos,
+    async (photo, idx) => {
+      const safeUrl = await compressDataUrlIfNeeded(photo.url, 260000);
+      return buildGalleryPhotoPayload({ ...photo, url: safeUrl }, idx);
+    },
+    onProgress
+  );
 }
 
-export async function syncFeaturedWeddingsToCloud(weddings: FeaturedWedding[]): Promise<void> {
+export async function syncFeaturedWeddingsToCloud(
+  weddings: FeaturedWedding[],
+  onProgress?: (label: string) => void
+): Promise<void> {
   if (!canWriteCloud()) return;
   const sliced = weddings.slice(0, 3);
   try {
@@ -656,9 +634,12 @@ export async function syncFeaturedWeddingsToCloud(weddings: FeaturedWedding[]): 
     for (let wIdx = 0; wIdx < sliced.length; wIdx++) {
       const wedding = sliced[wIdx];
       const cleanWeddingId = sanitizeDocId(wedding.id);
-      const safeCover = await compressDataUrlIfNeeded(wedding.coverImage, 450000);
+      const safeCover = await compressDataUrlIfNeeded(
+        wedding.coverImage || INITIAL_ABOUT_CONTENT.homepageHeroImage,
+        260000
+      );
 
-      // Write parent wedding document first so subcollection exists() rule passes
+      onProgress?.(`Featured Wedding ${wIdx + 1}/${sliced.length}`);
       await setDoc(
         doc(db, 'featuredWeddings', cleanWeddingId),
         buildFeaturedWeddingPayload({ ...wedding, coverImage: safeCover }, wIdx)
@@ -666,7 +647,10 @@ export async function syncFeaturedWeddingsToCloud(weddings: FeaturedWedding[]): 
 
       const subCol = collection(db, 'featuredWeddings', cleanWeddingId, 'photos');
       const existingPhotosSnap = await getDocs(subCol);
-      const nextPhotoIds = new Set(wedding.photos.map(p => sanitizeDocId(p.id)));
+      const validPhotos = (wedding.photos || []).filter(
+        p => typeof p.url === 'string' && p.url.trim().length > 0
+      );
+      const nextPhotoIds = new Set(validPhotos.map(p => sanitizeDocId(p.id)));
 
       for (const pd of existingPhotosSnap.docs) {
         if (!nextPhotoIds.has(pd.id)) {
@@ -674,10 +658,10 @@ export async function syncFeaturedWeddingsToCloud(weddings: FeaturedWedding[]): 
         }
       }
 
-      for (let pIdx = 0; pIdx < wedding.photos.length; pIdx++) {
-        const photo = wedding.photos[pIdx];
+      for (let pIdx = 0; pIdx < validPhotos.length; pIdx++) {
+        const photo = validPhotos[pIdx];
         const cleanPhotoId = sanitizeDocId(photo.id);
-        const safePhotoUrl = await compressDataUrlIfNeeded(photo.url, 450000);
+        const safePhotoUrl = await compressDataUrlIfNeeded(photo.url, 260000);
         await setDoc(
           doc(db, 'featuredWeddings', cleanWeddingId, 'photos', cleanPhotoId),
           buildFeaturedWeddingPhotoPayload(cleanWeddingId, { ...photo, url: safePhotoUrl }, pIdx)
@@ -712,9 +696,9 @@ export async function syncAboutContentToCloud(about: AboutContent): Promise<void
   if (!canWriteCloud()) return;
   try {
     const [safeHero, safeHome, safeStory] = await Promise.all([
-      compressDataUrlIfNeeded(about.homepageHeroImage || INITIAL_ABOUT_CONTENT.homepageHeroImage, 220000),
-      compressDataUrlIfNeeded(about.homepageImage || INITIAL_ABOUT_CONTENT.homepageImage, 220000),
-      compressDataUrlIfNeeded(about.storyImage || INITIAL_ABOUT_CONTENT.storyImage, 220000),
+      compressDataUrlIfNeeded(about.homepageHeroImage || INITIAL_ABOUT_CONTENT.homepageHeroImage, 180000),
+      compressDataUrlIfNeeded(about.homepageImage || INITIAL_ABOUT_CONTENT.homepageImage, 180000),
+      compressDataUrlIfNeeded(about.storyImage || INITIAL_ABOUT_CONTENT.storyImage, 180000),
     ]);
     await setDoc(
       doc(db, 'studioConfig', 'about'),
@@ -755,7 +739,10 @@ export function syncReviewsToCloudDebounced(reviews: Review[]): void {
 
 export async function syncBlogPostsToCloud(posts: BlogPost[]): Promise<void> {
   await replaceCollectionDocs('blogPosts', posts, async (post, idx) => {
-    const safeCover = await compressDataUrlIfNeeded(post.coverImage, 450000);
+    const safeCover = await compressDataUrlIfNeeded(
+      post.coverImage || INITIAL_ABOUT_CONTENT.homepageHeroImage,
+      260000
+    );
     return buildBlogPostPayload({ ...post, coverImage: safeCover }, idx);
   });
 }
@@ -780,8 +767,9 @@ export function syncVaultContentToCloudDebounced(vault: GuestVaultContent): void
 }
 
 export async function syncVaultPhotosToCloud(photos: VaultPhoto[]): Promise<void> {
-  await replaceCollectionDocs('vaultPhotos', photos, async (photo, idx) => {
-    const safeUrl = await compressDataUrlIfNeeded(photo.url, 450000);
+  const validPhotos = photos.filter(p => typeof p.url === 'string' && p.url.trim().length > 0);
+  await replaceCollectionDocs('vaultPhotos', validPhotos, async (photo, idx) => {
+    const safeUrl = await compressDataUrlIfNeeded(photo.url, 260000);
     return buildVaultPhotoPayload({ ...photo, url: safeUrl }, idx);
   });
 }
@@ -803,19 +791,22 @@ export async function deleteSingleDocCloud(colPath: string, docId: string): Prom
 
 /**
  * Publishes the entire current studio state (homepage, featured weddings, gallery,
- * pricing, about/reviews/blog/faqs, and guest vault) to Cloud Firestore.
+ * pricing, about/reviews/blog/faqs, and guest vault) to Cloud Firestore with progress feedback.
  */
-export async function publishAllStudioDataToCloud(payload: {
-  galleryPhotos: GalleryPhoto[];
-  featuredWeddings: FeaturedWedding[];
-  pricingPackages: PricingPackage[];
-  aboutContent: AboutContent;
-  faqs: FaqItem[];
-  reviews: Review[];
-  blogPosts: BlogPost[];
-  vaultContent: GuestVaultContent;
-  vaultPhotos: VaultPhoto[];
-}): Promise<void> {
+export async function publishAllStudioDataToCloud(
+  payload: {
+    galleryPhotos: GalleryPhoto[];
+    featuredWeddings: FeaturedWedding[];
+    pricingPackages: PricingPackage[];
+    aboutContent: AboutContent;
+    faqs: FaqItem[];
+    reviews: Review[];
+    blogPosts: BlogPost[];
+    vaultContent: GuestVaultContent;
+    vaultPhotos: VaultPhoto[];
+  },
+  onProgress?: (message: string) => void
+): Promise<void> {
   if (!canWriteCloud()) {
     throw new Error('Please sign in with your Studio Owner Google account to publish live changes.');
   }
@@ -823,13 +814,30 @@ export async function publishAllStudioDataToCloud(payload: {
   debounceTimers.forEach(timer => clearTimeout(timer));
   debounceTimers.clear();
 
+  onProgress?.('Publishing Homepage & About Us...');
   await syncAboutContentToCloud(payload.aboutContent);
+
+  onProgress?.('Publishing Pricing Packages...');
   await syncPricingToCloud(payload.pricingPackages);
+
+  onProgress?.('Publishing Guest Photo Vault text...');
   await syncVaultContentToCloud(payload.vaultContent);
-  await syncGalleryPhotosToCloud(payload.galleryPhotos);
-  await syncFeaturedWeddingsToCloud(payload.featuredWeddings);
+
+  onProgress?.(`Publishing Wedding Gallery (${payload.galleryPhotos.length} photos)...`);
+  await syncGalleryPhotosToCloud(payload.galleryPhotos, (curr, total) => {
+    onProgress?.(`Publishing Wedding Gallery (${curr}/${total})...`);
+  });
+
+  onProgress?.('Publishing Featured Weddings...');
+  await syncFeaturedWeddingsToCloud(payload.featuredWeddings, label => {
+    onProgress?.(`Publishing ${label}...`);
+  });
+
+  onProgress?.('Publishing FAQs, Reviews & Blog...');
   await syncFaqsToCloud(payload.faqs);
   await syncReviewsToCloud(payload.reviews);
   await syncBlogPostsToCloud(payload.blogPosts);
+
+  onProgress?.('Publishing Guest Vault Photos...');
   await syncVaultPhotosToCloud(payload.vaultPhotos);
 }
