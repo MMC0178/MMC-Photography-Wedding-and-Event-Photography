@@ -1,13 +1,14 @@
 'use client';
 
 import { useState } from 'react';
-import { Phone, Mail, Check, Send, Sparkles, Copy, ExternalLink } from 'lucide-react';
+import { Phone, Mail, Check, Send, Sparkles, Clock } from 'lucide-react';
 
 interface ContactPageProps {
   initialPackage?: string;
 }
 
 const STUDIO_EMAIL = 'michael@mmcphotography.co.uk';
+const FORMSUBMIT_DIRECT_URL = `https://formsubmit.co/ajax/${STUDIO_EMAIL}`;
 
 export default function ContactPage({ initialPackage }: ContactPageProps) {
   const [couple, setCouple] = useState('');
@@ -17,60 +18,104 @@ export default function ContactPage({ initialPackage }: ContactPageProps) {
   const [message, setMessage] = useState(() =>
     initialPackage ? `I am interested in the ${initialPackage} package. ` : ''
   );
+  const [website, setWebsite] = useState(''); // invisible anti-spam honeypot
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
   const [submitted, setSubmitted] = useState(false);
-  const [deliveredByServer, setDeliveredByServer] = useState(false);
-  const [mailtoUrl, setMailtoUrl] = useState('');
-  const [formattedSummary, setFormattedSummary] = useState('');
-  const [copied, setCopied] = useState(false);
+  const [needsActivation, setNeedsActivation] = useState(false);
+  const [submittedCouple, setSubmittedCouple] = useState('');
+  const [submittedDate, setSubmittedDate] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitError('');
+    setNeedsActivation(false);
     setIsSubmitting(true);
 
     try {
       const res = await fetch('/api/contact', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ couple, email, phone, date, message }),
+        body: JSON.stringify({ couple, email, phone, date, message, website }),
       });
 
       const data = await res.json();
       if (!res.ok) {
-        setSubmitError(data.error || 'Could not prepare your inquiry. Please try again.');
+        setSubmitError(data.error || 'Could not send your inquiry right now. Please try again.');
         return;
       }
 
-      setDeliveredByServer(Boolean(data.delivered));
-      setMailtoUrl(data.mailtoUrl || '');
-      setFormattedSummary(data.formattedMessage || '');
-      setSubmitted(true);
-
-      // If server-side email delivery isn't configured, open a pre-filled email draft to michael@mmcphotography.co.uk
-      if (!data.delivered && data.mailtoUrl) {
-        const anchor = document.createElement('a');
-        anchor.href = data.mailtoUrl;
-        anchor.rel = 'noopener noreferrer';
-        anchor.click();
+      if (data.delivered) {
+        setSubmittedCouple(couple);
+        setSubmittedDate(date);
+        setSubmitted(true);
+        return;
       }
+
+      if (data.needsActivation) {
+        setSubmittedCouple(couple);
+        setSubmittedDate(date);
+        setNeedsActivation(true);
+        setSubmitted(true);
+        return;
+      }
+
+      // Direct background HTTPS submission fallback (never opens the user's email client)
+      if (data.useClientRelay && data.relayPayload) {
+        const relayRes = await fetch(FORMSUBMIT_DIRECT_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify(data.relayPayload),
+        });
+
+        const relayData = (await relayRes.json().catch(() => ({}))) as {
+          success?: boolean | string;
+          message?: string;
+        };
+
+        const relaySuccess = relayData.success === true || relayData.success === 'true';
+        const relayMessage = String(relayData.message || '');
+
+        if (relayRes.ok && relaySuccess) {
+          setSubmittedCouple(couple);
+          setSubmittedDate(date);
+          setSubmitted(true);
+          return;
+        }
+
+        if (relayMessage.toLowerCase().includes('activation')) {
+          setSubmittedCouple(couple);
+          setSubmittedDate(date);
+          setNeedsActivation(true);
+          setSubmitted(true);
+          return;
+        }
+      }
+
+      setSubmitError(
+        `We could not deliver your inquiry right now. Please try again in a moment or call 07511616354.`
+      );
     } catch {
-      setSubmitError(`Could not submit right now. Please email ${STUDIO_EMAIL} directly.`);
+      setSubmitError(
+        `We could not send your inquiry right now. Please check your connection and try again, or call 07511616354.`
+      );
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const handleCopySummary = async () => {
-    if (!formattedSummary) return;
-    try {
-      await navigator.clipboard.writeText(`To: ${STUDIO_EMAIL}\n\n${formattedSummary}`);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2500);
-    } catch {
-      // Clipboard unavailable
-    }
+  const handleResetForm = () => {
+    setSubmitted(false);
+    setNeedsActivation(false);
+    setSubmitError('');
+    setCouple('');
+    setEmail('');
+    setPhone('');
+    setDate('');
+    setMessage('');
   };
 
   return (
@@ -142,49 +187,45 @@ export default function ContactPage({ initialPackage }: ContactPageProps) {
           <div className="lg:col-span-7 bg-white border border-stone-200/90 rounded-xs p-8 shadow-xs">
             {submitted ? (
               <div className="p-8 text-center space-y-4 bg-[#fbf9f6] rounded border border-[#e5dfd5] animate-in fade-in duration-300">
-                <div className="w-14 h-14 bg-emerald-100 text-emerald-700 rounded-full flex items-center justify-center mx-auto">
-                  <Check className="w-7 h-7" />
+                <div
+                  className={`w-14 h-14 rounded-full flex items-center justify-center mx-auto ${
+                    needsActivation
+                      ? 'bg-amber-100 text-amber-700'
+                      : 'bg-emerald-100 text-emerald-700'
+                  }`}
+                >
+                  {needsActivation ? <Clock className="w-7 h-7" /> : <Check className="w-7 h-7" />}
                 </div>
                 <h3 className="font-serif text-2xl text-stone-900">
-                  {deliveredByServer
-                    ? `Thank You, ${couple || 'there'}!`
-                    : `Your Inquiry Is Ready to Send, ${couple || 'there'}`}
+                  {needsActivation
+                    ? 'One-Time Inbox Activation Required'
+                    : `Thank You, ${submittedCouple || 'there'}!`}
                 </h3>
                 <p className="font-serif text-stone-600 text-base max-w-md mx-auto">
-                  {deliveredByServer ? (
+                  {needsActivation ? (
                     <>
-                      Your availability inquiry for <span className="font-semibold text-stone-900">{date || 'your wedding day'}</span> has been sent to <span className="font-semibold text-stone-900">{STUDIO_EMAIL}</span>. We will check our diary and reply within 24 hours.
+                      A one-time activation email has been sent to{' '}
+                      <span className="font-semibold text-stone-900">{STUDIO_EMAIL}</span>. Once
+                      that link is confirmed in the inbox, every website inquiry will deliver
+                      straight to {STUDIO_EMAIL} automatically.
                     </>
                   ) : (
                     <>
-                      Your email app should open with your pre-filled inquiry addressed to <span className="font-semibold text-stone-900">{STUDIO_EMAIL}</span>. If it didn&apos;t open automatically, click below to send or copy your details.
+                      Your availability inquiry for{' '}
+                      <span className="font-semibold text-stone-900">
+                        {submittedDate || 'your wedding day'}
+                      </span>{' '}
+                      has been sent directly to{' '}
+                      <span className="font-semibold text-stone-900">{STUDIO_EMAIL}</span>. We will
+                      check our diary and reply within 24 hours.
                     </>
                   )}
                 </p>
 
-                {!deliveredByServer && mailtoUrl && (
-                  <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
-                    <a
-                      href={mailtoUrl}
-                      className="inline-flex items-center gap-2 bg-[#1e2321] hover:bg-[#2c3330] text-white px-5 py-2.5 rounded text-xs uppercase tracking-widest font-sans font-semibold transition-colors"
-                    >
-                      <ExternalLink className="w-3.5 h-3.5 text-[#c2a378]" />
-                      <span>Open Email to {STUDIO_EMAIL}</span>
-                    </a>
-                    <button
-                      type="button"
-                      onClick={handleCopySummary}
-                      className="inline-flex items-center gap-2 border border-stone-300 bg-white hover:bg-stone-50 text-stone-800 px-4 py-2.5 rounded text-xs uppercase tracking-widest font-sans font-semibold transition-colors"
-                    >
-                      <Copy className="w-3.5 h-3.5 text-[#c2a378]" />
-                      <span>{copied ? 'Copied!' : 'Copy Inquiry Details'}</span>
-                    </button>
-                  </div>
-                )}
-
                 <div className="pt-4">
                   <button
-                    onClick={() => setSubmitted(false)}
+                    type="button"
+                    onClick={handleResetForm}
                     className="text-xs font-sans uppercase tracking-widest text-[#c2a378] hover:text-stone-900 underline underline-offset-4"
                   >
                     Submit another inquiry
@@ -203,6 +244,20 @@ export default function ContactPage({ initialPackage }: ContactPageProps) {
                   </div>
                 )}
 
+                {/* Invisible anti-spam honeypot field */}
+                <div className="hidden" aria-hidden="true">
+                  <label htmlFor="contact-website">Website</label>
+                  <input
+                    id="contact-website"
+                    name="website"
+                    type="text"
+                    tabIndex={-1}
+                    autoComplete="off"
+                    value={website}
+                    onChange={e => setWebsite(e.target.value)}
+                  />
+                </div>
+
                 {/* Names & Email */}
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div>
@@ -212,6 +267,7 @@ export default function ContactPage({ initialPackage }: ContactPageProps) {
                     <input
                       type="text"
                       required
+                      maxLength={150}
                       placeholder="e.g. Charlotte & James"
                       value={couple}
                       onChange={e => setCouple(e.target.value)}
@@ -225,6 +281,7 @@ export default function ContactPage({ initialPackage }: ContactPageProps) {
                     <input
                       type="email"
                       required
+                      maxLength={254}
                       placeholder="you@example.com"
                       value={email}
                       onChange={e => setEmail(e.target.value)}
@@ -241,6 +298,7 @@ export default function ContactPage({ initialPackage }: ContactPageProps) {
                     </label>
                     <input
                       type="tel"
+                      maxLength={40}
                       placeholder="e.g. 07511616354"
                       value={phone}
                       onChange={e => setPhone(e.target.value)}
@@ -268,6 +326,7 @@ export default function ContactPage({ initialPackage }: ContactPageProps) {
                   </label>
                   <textarea
                     rows={4}
+                    maxLength={5000}
                     placeholder="We would love to know about your plans, what vibe you are going for, and any questions you have..."
                     value={message}
                     onChange={e => setMessage(e.target.value)}
