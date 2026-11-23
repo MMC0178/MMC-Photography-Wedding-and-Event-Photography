@@ -7,6 +7,8 @@ import {
   subscribeFeaturedWeddingsCloud,
   syncFeaturedWeddingsToCloud,
   syncFeaturedWeddingsToCloudDebounced,
+  upsertFeaturedWeddingPhotoCloud,
+  deleteFeaturedWeddingPhotoCloud,
 } from './studio-cloud-sync';
 
 const STORAGE_KEY = 'mmc_featured_weddings_v3';
@@ -94,7 +96,10 @@ export function addPhotoToFeaturedWedding(weddingId: string, photo: { url: strin
   const next = current.map((w, i) =>
     i === index ? { ...w, photos: [newPhoto, ...w.photos] } : w
   );
-  saveFeaturedWeddings(next, true);
+  persistLocally(next, true);
+  void upsertFeaturedWeddingPhotoCloud(weddingId, newPhoto).catch(err => {
+    console.error('Failed to sync new featured wedding photo to cloud:', err);
+  });
   return true;
 }
 
@@ -105,7 +110,10 @@ export function removePhotoFromFeaturedWedding(weddingId: string, photoId: strin
   const next = current.map((w, i) =>
     i === index ? { ...w, photos: w.photos.filter(p => p.id !== photoId) } : w
   );
-  saveFeaturedWeddings(next, true);
+  persistLocally(next, true);
+  void deleteFeaturedWeddingPhotoCloud(weddingId, photoId).catch(err => {
+    console.error('Failed to delete featured wedding photo from cloud:', err);
+  });
   return true;
 }
 

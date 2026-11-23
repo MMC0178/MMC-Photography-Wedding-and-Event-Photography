@@ -6,6 +6,9 @@ import { idbGet, idbSet } from './studio-storage';
 import {
   subscribeGalleryPhotosCloud,
   syncGalleryPhotosToCloud,
+  upsertSingleGalleryPhotoCloud,
+  upsertGalleryPhotosBatchCloud,
+  deleteGalleryPhotoCloud,
 } from './studio-cloud-sync';
 
 const STORAGE_KEY = 'mmc_gallery_photos_v3';
@@ -71,14 +74,36 @@ export function addGalleryPhoto(photoData: Omit<GalleryPhoto, 'id'>): GalleryPho
     id: `photo-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
   };
   const updated = [newPhoto, ...current];
-  saveGalleryPhotos(updated);
+  persistLocally(updated, true);
+  void upsertSingleGalleryPhotoCloud(newPhoto).catch(err => {
+    console.error('Failed to sync new gallery photo to cloud:', err);
+  });
   return newPhoto;
+}
+
+export function addGalleryPhotosBatch(photosData: Array<Omit<GalleryPhoto, 'id'>>): GalleryPhoto[] {
+  if (photosData.length === 0) return [];
+  const current = getStoredGalleryPhotos();
+  const now = Date.now();
+  const created: GalleryPhoto[] = photosData.map((photoData, idx) => ({
+    ...photoData,
+    id: `photo-${now + idx}-${Math.random().toString(36).substring(2, 6)}`,
+  }));
+  const updated = [...created, ...current];
+  persistLocally(updated, true);
+  void upsertGalleryPhotosBatchCloud(created).catch(err => {
+    console.error('Failed to sync uploaded gallery photos to cloud:', err);
+  });
+  return created;
 }
 
 export function deleteGalleryPhoto(id: string): boolean {
   const current = getStoredGalleryPhotos();
   const filtered = current.filter(p => p.id !== id);
-  saveGalleryPhotos(filtered);
+  persistLocally(filtered, true);
+  void deleteGalleryPhotoCloud(id).catch(err => {
+    console.error('Failed to delete gallery photo from cloud:', err);
+  });
   return true;
 }
 

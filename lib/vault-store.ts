@@ -14,6 +14,8 @@ import {
   syncVaultContentToCloudDebounced,
   syncVaultPhotosToCloud,
   syncVaultPhotosToCloudDebounced,
+  upsertVaultPhotoCloud,
+  deleteVaultPhotoCloud,
 } from './studio-cloud-sync';
 
 const VAULT_CONTENT_KEY = 'mmc_vault_content_v1';
@@ -103,8 +105,8 @@ export function addVaultPhoto(photo: Omit<VaultPhoto, 'id'>): VaultPhoto {
   };
   const nextPhotos = [newPhoto, ...current.vaultPhotos];
   saveAllLocally({ ...current, vaultPhotos: nextPhotos }, true);
-  void syncVaultPhotosToCloud(nextPhotos).catch(err =>
-    console.error('Failed to sync vault photos to cloud:', err)
+  void upsertVaultPhotoCloud(newPhoto).catch(err =>
+    console.error('Failed to sync new vault photo to cloud:', err)
   );
   return newPhoto;
 }
@@ -126,8 +128,8 @@ export function deleteVaultPhoto(id: string): void {
   const current = getStoredVaultData();
   const filtered = current.vaultPhotos.filter(p => p.id !== id);
   saveAllLocally({ ...current, vaultPhotos: filtered }, true);
-  void syncVaultPhotosToCloud(filtered).catch(err =>
-    console.error('Failed to sync vault photo deletion to cloud:', err)
+  void deleteVaultPhotoCloud(id).catch(err =>
+    console.error('Failed to delete vault photo from cloud:', err)
   );
 }
 

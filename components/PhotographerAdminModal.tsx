@@ -24,6 +24,8 @@ import {
   LogIn,
   LogOut,
   AlertCircle,
+  Loader2,
+  RefreshCw,
 } from 'lucide-react';
 import {
   FeaturedWedding,
@@ -39,13 +41,17 @@ import {
   VaultPhoto,
 } from '@/lib/wedding-data';
 import { optimizeUploadedImage } from '@/lib/studio-storage';
+import { addGalleryPhotosBatch } from '@/lib/gallery-store';
 import {
   isAuthorizedStudioUser,
   signInStudioAdmin,
   signOutStudioAdmin,
   subscribeStudioAuth,
 } from '@/lib/firebase';
-import { publishAllStudioDataToCloud } from '@/lib/studio-cloud-sync';
+import {
+  publishAllStudioDataToCloud,
+  clearLocalCloudVersionCache,
+} from '@/lib/studio-cloud-sync';
 
 interface PhotographerAdminModalProps {
   isOpen: boolean;
@@ -187,6 +193,7 @@ export default function PhotographerAdminModal({
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isPublishingLive, setIsPublishingLive] = useState(false);
   const [publishProgressMsg, setPublishProgressMsg] = useState('');
+  const [publishPercent, setPublishPercent] = useState(0);
   const [cloudErrorMsg, setCloudErrorMsg] = useState('');
 
   useEffect(() => {
@@ -200,10 +207,29 @@ export default function PhotographerAdminModal({
 
   const isStudioAdmin = isAuthorizedStudioUser(authUser);
 
-  const showSuccess = (msg: string) => {
+  const getProgressWidthClass = (pct: number): string => {
+    if (pct >= 95) return 'w-full';
+    if (pct >= 85) return 'w-11/12';
+    if (pct >= 75) return 'w-5/6';
+    if (pct >= 65) return 'w-3/4';
+    if (pct >= 55) return 'w-2/3';
+    if (pct >= 45) return 'w-1/2';
+    if (pct >= 35) return 'w-2/5';
+    if (pct >= 25) return 'w-1/3';
+    if (pct >= 15) return 'w-1/4';
+    if (pct >= 8) return 'w-1/6';
+    return 'w-1/12';
+  };
+
+  const showSuccess = (msg: string, durationMs = 5000) => {
     setCloudErrorMsg('');
     setSaveSuccessMsg(msg);
-    setTimeout(() => setSaveSuccessMsg(''), 4000);
+    setTimeout(() => setSaveSuccessMsg(''), durationMs);
+  };
+
+  const handleForcePullFromCloud = () => {
+    clearLocalCloudVersionCache();
+    window.location.reload();
   };
 
   const handleAdminSignIn = async () => {
@@ -216,7 +242,7 @@ export default function PhotographerAdminModal({
           `Signed in as ${user.email || 'unknown account'}, which is not listed as the Studio Owner account. Please sign in with your Studio Owner Google account.`
         );
       } else {
-        showSuccess(`Signed in as ${user.email}. Click "Publish All Changes Live" to push any local edits to the live website.`);
+        showSuccess(`Signed in as ${user.email}. Click "Publish All Changes Live" to push any local edits to the live website.`, 6000);
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Sign-in was cancelled or blocked.';
@@ -242,7 +268,9 @@ export default function PhotographerAdminModal({
     }
     setIsPublishingLive(true);
     setPublishProgressMsg('Starting live sync...');
+    setPublishPercent(5);
     setCloudErrorMsg('');
+    setSaveSuccessMsg('');
     try {
       await publishAllStudioDataToCloud(
         {
@@ -256,9 +284,18 @@ export default function PhotographerAdminModal({
           vaultContent,
           vaultPhotos,
         },
-        status => setPublishProgressMsg(status)
+        (status, pct) => {
+          setPublishProgressMsg(status);
+          if (typeof pct === 'number') {
+            setPublishPercent(pct);
+          }
+        }
       );
-      showSuccess(customSuccessMsg || 'All changes published live to www.mmcphotography.co.uk!');
+      showSuccess(
+        customSuccessMsg ||
+          `All changes published live! (${galleryPhotos.length} gallery photos, ${featuredWeddings.length} featured weddings, pricing & text synced)`,
+        8000
+      );
     } catch (err) {
       console.error('Failed to publish live changes:', err);
       let detail = '';
@@ -280,6 +317,7 @@ export default function PhotographerAdminModal({
     } finally {
       setIsPublishingLive(false);
       setPublishProgressMsg('');
+      setPublishPercent(0);
     }
   };
 
@@ -312,20 +350,20 @@ export default function PhotographerAdminModal({
         setNewGalleryPhotoUrl(optimizedUrl);
         setUploadedGalleryFileName(files[0].name);
       } else {
-        let addedCount = 0;
+        const batchToAdd: Array<Omit<GalleryPhoto, 'id'>> = [];
         for (const file of files) {
-          const optimizedUrl = await optimizeUploadedImage(file);
-          onAddGalleryPhoto({
+          const optimizedUrl = await optimizeUploadedImage(file, 1280, 0.78, 240000);
+          batchToAdd.push({
             url: optimizedUrl,
             title: file.name.replace(/\.[^/.]+$/, '') || 'Wedding Photograph',
             caption: '',
             category: newGalleryCategory,
           });
-          addedCount += 1;
         }
+        addGalleryPhotosBatch(batchToAdd);
         setAdminGalleryFilter(newGalleryCategory);
         showSuccess(
-          `${addedCount} photos added to ${newGalleryCategory.replace('-', ' ')} gallery!`
+          `${batchToAdd.length} photos added to ${newGalleryCategory.replace('-', ' ')} gallery${isStudioAdmin ? ' and syncing live!' : ' (sign in above to publish live)!'}`
         );
       }
     } catch (err) {
@@ -533,9 +571,20 @@ export default function PhotographerAdminModal({
                   type="button"
                   onClick={() => void handlePublishAllLive()}
                   disabled={isPublishingLive}
-                  className="bg-[#1e2321] hover:bg-stone-800 text-white px-3.5 py-1.5 rounded text-[11px] uppercase tracking-wider font-sans font-semibold transition-colors disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 bg-[#1e2321] hover:bg-stone-800 text-white px-3.5 py-1.5 rounded text-[11px] uppercase tracking-wider font-sans font-semibold transition-colors disabled:opacity-60"
                 >
-                  {isPublishingLive ? publishProgressMsg || 'Publishing...' : 'Publish All Changes Live'}
+                  {isPublishingLive && <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c2a378]" />}
+                  <span>{isPublishingLive ? `Publishing (${publishPercent}%)` : 'Publish All Changes Live'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleForcePullFromCloud}
+                  disabled={isPublishingLive}
+                  title="Pull latest published photos and text from the live cloud database"
+                  className="inline-flex items-center gap-1 border border-stone-300 bg-white hover:bg-stone-100 text-stone-700 px-2.5 py-1.5 rounded text-[11px] font-semibold transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  <span>Sync Latest</span>
                 </button>
                 <button
                   type="button"
@@ -560,9 +609,27 @@ export default function PhotographerAdminModal({
           </div>
         </div>
 
+        {/* Live Publishing Progress Banner (always visible above tabs) */}
+        {isPublishingLive && (
+          <div className="bg-[#1e2321] text-white px-6 py-3 border-b border-[#c2a378]/40 space-y-2 shrink-0">
+            <div className="flex items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2 font-medium">
+                <Loader2 className="w-4 h-4 animate-spin text-[#c2a378] shrink-0" />
+                <span>{publishProgressMsg || 'Publishing changes to live website...'}</span>
+              </div>
+              <span className="font-mono text-[#c2a378] font-semibold shrink-0">{publishPercent}%</span>
+            </div>
+            <div className="w-full h-1.5 bg-white/15 rounded-full overflow-hidden">
+              <div
+                className={`h-full bg-[#c2a378] rounded-full transition-all duration-300 ${getProgressWidthClass(publishPercent)}`}
+              />
+            </div>
+          </div>
+        )}
+
         {/* Cloud Error Notice Banner */}
         {cloudErrorMsg && (
-          <div className="bg-red-50 border-b border-red-200 text-red-800 text-xs py-2 px-6 flex items-center gap-2 shrink-0">
+          <div className="bg-red-50 border-b border-red-200 text-red-800 text-xs py-2.5 px-6 flex items-center gap-2 shrink-0">
             <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
             <span>{cloudErrorMsg}</span>
           </div>
@@ -570,7 +637,7 @@ export default function PhotographerAdminModal({
 
         {/* Global Save Notice Banner */}
         {saveSuccessMsg && (
-          <div className="bg-emerald-50 border-b border-emerald-200 text-emerald-800 text-xs py-2 px-6 flex items-center gap-2 shrink-0">
+          <div className="bg-emerald-50 border-b border-emerald-200 text-emerald-800 text-xs py-2.5 px-6 flex items-center gap-2 shrink-0">
             <Check className="w-4 h-4 text-emerald-600 shrink-0" />
             <span>{saveSuccessMsg}</span>
           </div>
@@ -2882,9 +2949,10 @@ export default function PhotographerAdminModal({
                 type="button"
                 onClick={() => void handlePublishAllLive()}
                 disabled={isPublishingLive}
-                className="border border-stone-400 bg-white text-stone-900 hover:bg-stone-200 px-4 py-2 rounded text-xs uppercase tracking-wider font-sans font-semibold transition-colors disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 border border-stone-400 bg-white text-stone-900 hover:bg-stone-200 px-4 py-2 rounded text-xs uppercase tracking-wider font-sans font-semibold transition-colors disabled:opacity-60"
               >
-                {isPublishingLive ? 'Publishing...' : 'Publish Live Now'}
+                {isPublishingLive && <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c2a378]" />}
+                <span>{isPublishingLive ? `Publishing (${publishPercent}%)` : 'Publish Live Now'}</span>
               </button>
             )}
             <button

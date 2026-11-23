@@ -9,7 +9,9 @@ import {
   deleteDoc,
   query,
   orderBy,
+  type Timestamp,
 } from 'firebase/firestore';
+import firebaseConfig from '../firebase-applet-config.json';
 import { compressDataUrlIfNeeded, idbGet } from './studio-storage';
 import {
   auth,
@@ -30,6 +32,7 @@ import {
   GalleryPhoto,
   GuestVaultContent,
   INITIAL_ABOUT_CONTENT,
+  INITIAL_PRICING_PACKAGES,
   INITIAL_VAULT_CONTENT,
   PricingPackage,
   Review,
@@ -44,14 +47,35 @@ const VALID_GALLERY_CATEGORIES = new Set<GalleryPhoto['category']>([
   'dancing',
 ]);
 
+const WRITE_TIMEOUT_MS = 25000;
+const WRITE_CONCURRENCY = 5;
+
 function canWriteCloud(): boolean {
   return isAuthorizedStudioUser(auth.currentUser);
+}
+
+function withTimeout<T>(promise: Promise<T>, label: string, ms = WRITE_TIMEOUT_MS): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Timed out while ${label}. Please check your connection and try again.`));
+    }, ms);
+    promise.then(
+      val => {
+        clearTimeout(timer);
+        resolve(val);
+      },
+      err => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
 }
 
 // Debounce timers for rapid typing updates
 const debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-function scheduleDebouncedWrite(key: string, fn: () => Promise<void>, delayMs = 600) {
+function scheduleDebouncedWrite(key: string, fn: () => Promise<void>, delayMs = 700) {
   const existingTimer = debounceTimers.get(key);
   if (existingTimer) {
     clearTimeout(existingTimer);
@@ -241,14 +265,21 @@ function buildVaultPhotoPayload(photo: VaultPhoto, sortOrder: number) {
   };
 }
 
-// --- Quota-Friendly One-Time Cloud Hydration with Deduplication & 30-Min Cache ---
+// --- Version-Checked Cloud Hydration (Instant Live Updates + Minimal Read Units) ---
 
-const CLOUD_SYNC_CACHE_KEY = 'mmc_cloud_sync_ts_v1';
-const CLOUD_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const SECTION_VERSIONS_KEY = 'mmc_cloud_section_versions_v2';
 
 const inFlightHydrations = new Set<string>();
 const completedHydrationsThisLoad = new Set<string>();
 let quotaExceededThisLoad = false;
+
+interface CloudManifestResult {
+  versionMs: number;
+  packages: PricingPackage[] | null;
+  failed: boolean;
+}
+
+let manifestPromiseThisLoad: Promise<CloudManifestResult> | null = null;
 
 function isQuotaExceededError(error: unknown): boolean {
   const msg = error instanceof Error ? error.message : String(error);
@@ -259,10 +290,10 @@ function isQuotaExceededError(error: unknown): boolean {
   );
 }
 
-function getSectionSyncTimestamp(section: string): number {
+function getStoredSectionVersion(section: string): number {
   if (typeof window === 'undefined') return 0;
   try {
-    const raw = localStorage.getItem(CLOUD_SYNC_CACHE_KEY);
+    const raw = localStorage.getItem(SECTION_VERSIONS_KEY);
     if (!raw) return 0;
     const parsed = JSON.parse(raw) as Record<string, number>;
     return typeof parsed[section] === 'number' ? parsed[section] : 0;
@@ -271,39 +302,102 @@ function getSectionSyncTimestamp(section: string): number {
   }
 }
 
-function markSectionSynced(section: string): void {
+function setStoredSectionVersion(section: string, versionMs: number): void {
   completedHydrationsThisLoad.add(section);
   if (typeof window === 'undefined') return;
   try {
-    const raw = localStorage.getItem(CLOUD_SYNC_CACHE_KEY);
+    const raw = localStorage.getItem(SECTION_VERSIONS_KEY);
     const parsed: Record<string, number> = raw ? JSON.parse(raw) : {};
-    parsed[section] = Date.now();
-    localStorage.setItem(CLOUD_SYNC_CACHE_KEY, JSON.stringify(parsed));
+    parsed[section] = versionMs > 0 ? versionMs : Date.now();
+    localStorage.setItem(SECTION_VERSIONS_KEY, JSON.stringify(parsed));
   } catch {
     // Ignore storage errors
   }
 }
 
-async function shouldSkipCloudHydration(
+export function clearLocalCloudVersionCache(): void {
+  completedHydrationsThisLoad.clear();
+  manifestPromiseThisLoad = null;
+  quotaExceededThisLoad = false;
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(SECTION_VERSIONS_KEY);
+    localStorage.removeItem('mmc_cloud_sync_ts_v1');
+  } catch {
+    // Ignore storage errors
+  }
+}
+
+/**
+ * Reads the tiny (~5 KB / 2 read units) `studioConfig/pricing` doc once per page load.
+ * Its `updatedAt` timestamp acts as the live publish version:
+ * - If Michael published ANY new photo or edit, `versionMs` is newer -> every visitor immediately pulls fresh cloud data!
+ * - If nothing changed since the visitor's last visit and IndexedDB already has the photos -> 0 heavy photo reads!
+ */
+function getCloudManifestOnce(): Promise<CloudManifestResult> {
+  if (manifestPromiseThisLoad) {
+    return manifestPromiseThisLoad;
+  }
+
+  manifestPromiseThisLoad = (async () => {
+    try {
+      const snap = await getDoc(doc(db, 'studioConfig', 'pricing'));
+      if (!snap.exists()) {
+        return { versionMs: 0, packages: null, failed: false };
+      }
+      const data = snap.data();
+      const updatedAt = data.updatedAt as Timestamp | undefined;
+      const versionMs =
+        updatedAt && typeof updatedAt.toMillis === 'function' ? updatedAt.toMillis() : 0;
+      const packages =
+        Array.isArray(data.packages) && data.packages.length > 0
+          ? (data.packages as PricingPackage[])
+          : null;
+      return { versionMs, packages, failed: false };
+    } catch (error) {
+      if (isQuotaExceededError(error)) {
+        quotaExceededThisLoad = true;
+      }
+      try {
+        handleFirestoreError(error, OperationType.GET, 'studioConfig/pricing');
+      } catch {
+        // Logged via handleFirestoreError
+      }
+      return { versionMs: 0, packages: null, failed: true };
+    }
+  })();
+
+  return manifestPromiseThisLoad;
+}
+
+async function resolveHydrationDecision(
   section: string,
   hasLocalCachedValue: () => Promise<boolean>
-): Promise<boolean> {
-  if (quotaExceededThisLoad) return true;
+): Promise<{ skip: boolean; cloudVersionMs: number }> {
+  if (quotaExceededThisLoad) return { skip: true, cloudVersionMs: 0 };
   if (inFlightHydrations.has(section) || completedHydrationsThisLoad.has(section)) {
-    return true;
+    return { skip: true, cloudVersionMs: 0 };
   }
-  const lastSyncedAt = getSectionSyncTimestamp(section);
-  if (lastSyncedAt > 0 && Date.now() - lastSyncedAt < CLOUD_CACHE_TTL_MS) {
+
+  const manifest = await getCloudManifestOnce();
+  if (manifest.failed || quotaExceededThisLoad) {
+    return { skip: true, cloudVersionMs: 0 };
+  }
+
+  const storedVersion = getStoredSectionVersion(section);
+  // Skip heavy collection download ONLY when cloud version matches our already-cached local version
+  if (manifest.versionMs > 0 && storedVersion >= manifest.versionMs) {
     try {
       if (await hasLocalCachedValue()) {
         completedHydrationsThisLoad.add(section);
-        return true;
+        return { skip: true, cloudVersionMs: manifest.versionMs };
       }
     } catch {
-      // Proceed with cloud read if cache check fails
+      // Proceed to fetch from cloud if local check fails
     }
   }
-  return false;
+
+  return { skip: false, cloudVersionMs: manifest.versionMs };
 }
 
 export function subscribeGalleryPhotosCloud(
@@ -314,7 +408,7 @@ export function subscribeGalleryPhotosCloud(
   const section = 'galleryPhotos';
 
   void (async () => {
-    const skip = await shouldSkipCloudHydration(section, async () => {
+    const { skip, cloudVersionMs } = await resolveHydrationDecision(section, async () => {
       const stored = await idbGet<GalleryPhoto[]>('mmc_gallery_photos_v3');
       return Array.isArray(stored) && stored.length > 0;
     });
@@ -344,7 +438,7 @@ export function subscribeGalleryPhotosCloud(
           onData(items);
         }
       }
-      markSectionSynced(section);
+      setStoredSectionVersion(section, cloudVersionMs);
     } catch (error) {
       if (isQuotaExceededError(error)) {
         quotaExceededThisLoad = true;
@@ -372,7 +466,7 @@ export function subscribeFeaturedWeddingsCloud(
   const section = 'featuredWeddings';
 
   void (async () => {
-    const skip = await shouldSkipCloudHydration(section, async () => {
+    const { skip, cloudVersionMs } = await resolveHydrationDecision(section, async () => {
       const stored = await idbGet<FeaturedWedding[]>('mmc_featured_weddings_v3');
       return Array.isArray(stored) && stored.length > 0;
     });
@@ -436,7 +530,7 @@ export function subscribeFeaturedWeddingsCloud(
         }
       }
       if (!quotaExceededThisLoad) {
-        markSectionSynced(section);
+        setStoredSectionVersion(section, cloudVersionMs);
       }
     } catch (error) {
       if (isQuotaExceededError(error)) {
@@ -461,40 +555,20 @@ export function subscribePricingCloud(
   onData: (packages: PricingPackage[]) => void
 ): () => void {
   let active = true;
-  const docPath = 'studioConfig/pricing';
   const section = 'pricing';
 
   void (async () => {
-    const skip = await shouldSkipCloudHydration(section, async () => {
-      try {
-        const raw = localStorage.getItem('mmc_pricing_packages_v3');
-        return Boolean(raw && JSON.parse(raw).length > 0);
-      } catch {
-        return false;
-      }
-    });
-    if (!active || skip) return;
-
+    if (completedHydrationsThisLoad.has(section) || inFlightHydrations.has(section)) {
+      return;
+    }
     inFlightHydrations.add(section);
     try {
-      const snap = await getDoc(doc(db, 'studioConfig', 'pricing'));
-      if (!active) return;
-      if (snap.exists()) {
-        const data = snap.data();
-        if (Array.isArray(data.packages) && data.packages.length > 0) {
-          onData(data.packages as PricingPackage[]);
-        }
+      const manifest = await getCloudManifestOnce();
+      if (!active || manifest.failed) return;
+      if (manifest.packages && manifest.packages.length > 0) {
+        onData(manifest.packages);
       }
-      markSectionSynced(section);
-    } catch (error) {
-      if (isQuotaExceededError(error)) {
-        quotaExceededThisLoad = true;
-      }
-      try {
-        handleFirestoreError(error, OperationType.GET, docPath);
-      } catch {
-        // Logged via handleFirestoreError
-      }
+      setStoredSectionVersion(section, manifest.versionMs);
     } finally {
       inFlightHydrations.delete(section);
     }
@@ -515,7 +589,7 @@ export function subscribeAboutCloud(callbacks: {
   const section = 'aboutBundle';
 
   void (async () => {
-    const skip = await shouldSkipCloudHydration(section, async () => {
+    const { skip, cloudVersionMs } = await resolveHydrationDecision(section, async () => {
       const stored = await idbGet<{ aboutContent?: AboutContent }>('mmc_about_bundle_v1');
       return Boolean(stored && stored.aboutContent);
     });
@@ -648,7 +722,7 @@ export function subscribeAboutCloud(callbacks: {
       }
 
       if (!hadError && !quotaExceededThisLoad) {
-        markSectionSynced(section);
+        setStoredSectionVersion(section, cloudVersionMs);
       }
     } finally {
       inFlightHydrations.delete(section);
@@ -668,7 +742,7 @@ export function subscribeVaultCloud(callbacks: {
   const section = 'vaultBundle';
 
   void (async () => {
-    const skip = await shouldSkipCloudHydration(section, async () => {
+    const { skip, cloudVersionMs } = await resolveHydrationDecision(section, async () => {
       const stored = await idbGet<{ vaultContent?: GuestVaultContent }>('mmc_vault_bundle_v1');
       return Boolean(stored && stored.vaultContent);
     });
@@ -740,7 +814,7 @@ export function subscribeVaultCloud(callbacks: {
       }
 
       if (!hadError && !quotaExceededThisLoad) {
-        markSectionSynced(section);
+        setStoredSectionVersion(section, cloudVersionMs);
       }
     } finally {
       inFlightHydrations.delete(section);
@@ -752,7 +826,256 @@ export function subscribeVaultCloud(callbacks: {
   };
 }
 
-// --- Admin Cloud Write Helpers ---
+// --- Lightweight ID-Only Query Helper (avoids downloading 10+ MB of base64 photos just to diff IDs) ---
+
+async function fetchExistingDocIdsLightweight(
+  collectionId: string,
+  parentPath = ''
+): Promise<string[] | null> {
+  try {
+    const base = `https://firestore.googleapis.com/v1/projects/${firebaseConfig.projectId}/databases/${firebaseConfig.firestoreDatabaseId}/documents`;
+    const runQueryUrl = parentPath ? `${base}/${parentPath}:runQuery` : `${base}:runQuery`;
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    try {
+      const token = await auth.currentUser?.getIdToken();
+      if (token) {
+        headers.Authorization = `Bearer ${token}`;
+      }
+    } catch {
+      // Public read rules allow listing without token
+    }
+
+    const res = await withTimeout(
+      fetch(runQueryUrl, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          structuredQuery: {
+            from: [{ collectionId }],
+            select: { fields: [{ fieldPath: 'id' }] },
+          },
+        }),
+      }),
+      `checking existing ${collectionId}`,
+      12000
+    );
+
+    if (!res.ok) return null;
+    const rows = (await res.json()) as Array<{ document?: { name?: string } }>;
+    if (!Array.isArray(rows)) return null;
+
+    const ids: string[] = [];
+    for (const row of rows) {
+      const name = row?.document?.name;
+      if (typeof name === 'string') {
+        const docId = name.split('/').pop();
+        if (docId) ids.push(docId);
+      }
+    }
+    return ids;
+  } catch {
+    return null;
+  }
+}
+
+async function runInBatches<T>(
+  items: T[],
+  batchSize: number,
+  worker: (item: T, index: number) => Promise<void>,
+  onProgress?: (completed: number, total: number) => void
+): Promise<void> {
+  let completed = 0;
+  for (let i = 0; i < items.length; i += batchSize) {
+    const chunk = items.slice(i, i + batchSize);
+    await Promise.all(
+      chunk.map(async (item, offset) => {
+        await worker(item, i + offset);
+        completed += 1;
+        onProgress?.(completed, items.length);
+      })
+    );
+  }
+}
+
+function getLocalPricingPackagesFallback(): PricingPackage[] {
+  if (typeof window === 'undefined') return INITIAL_PRICING_PACKAGES;
+  try {
+    const raw = localStorage.getItem('mmc_pricing_packages_v3');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed as PricingPackage[];
+      }
+    }
+  } catch {
+    // Use defaults
+  }
+  return INITIAL_PRICING_PACKAGES;
+}
+
+/**
+ * Bumps `studioConfig/pricing.updatedAt` so all visitors' browsers immediately detect
+ * newly added/deleted photos on their very next page load (0-second cache invalidation).
+ */
+export function bumpCloudPublishVersionDebounced(): void {
+  if (!canWriteCloud()) return;
+  scheduleDebouncedWrite(
+    '__cloudVersionBump__',
+    async () => {
+      if (!canWriteCloud()) return;
+      const packages = getLocalPricingPackagesFallback();
+      await withTimeout(
+        setDoc(doc(db, 'studioConfig', 'pricing'), buildPricingPayload(packages)),
+        'updating live publish version'
+      );
+      const now = Date.now();
+      for (const sec of ['pricing', 'galleryPhotos', 'featuredWeddings', 'aboutBundle', 'vaultBundle']) {
+        setStoredSectionVersion(sec, now);
+      }
+    },
+    1000
+  );
+}
+
+// --- Fast Single-Item Cloud Mutations (0 collection reads, 1 doc write/delete) ---
+
+export async function upsertSingleGalleryPhotoCloud(
+  photo: GalleryPhoto,
+  sortOrder = -Date.now()
+): Promise<void> {
+  if (!canWriteCloud() || !photo.url?.trim()) return;
+  const cleanId = sanitizeDocId(photo.id);
+  try {
+    const safeUrl = await compressDataUrlIfNeeded(photo.url, 260000);
+    await withTimeout(
+      setDoc(doc(db, 'galleryPhotos', cleanId), buildGalleryPhotoPayload({ ...photo, url: safeUrl }, sortOrder)),
+      `saving gallery photo ${cleanId}`
+    );
+    bumpCloudPublishVersionDebounced();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `galleryPhotos/${cleanId}`);
+  }
+}
+
+export async function upsertGalleryPhotosBatchCloud(photos: GalleryPhoto[]): Promise<void> {
+  if (!canWriteCloud() || photos.length === 0) return;
+  const baseOrder = -Date.now();
+  const validPhotos = photos.filter(p => typeof p.url === 'string' && p.url.trim().length > 0);
+  try {
+    await runInBatches(validPhotos, WRITE_CONCURRENCY, async (photo, idx) => {
+      const cleanId = sanitizeDocId(photo.id);
+      const safeUrl = await compressDataUrlIfNeeded(photo.url, 260000);
+      await withTimeout(
+        setDoc(
+          doc(db, 'galleryPhotos', cleanId),
+          buildGalleryPhotoPayload({ ...photo, url: safeUrl }, baseOrder + idx)
+        ),
+        `saving gallery photo ${idx + 1}/${validPhotos.length}`
+      );
+    });
+    bumpCloudPublishVersionDebounced();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'galleryPhotos');
+  }
+}
+
+export async function deleteGalleryPhotoCloud(photoId: string): Promise<void> {
+  if (!canWriteCloud()) return;
+  const cleanId = sanitizeDocId(photoId);
+  try {
+    await withTimeout(
+      deleteDoc(doc(db, 'galleryPhotos', cleanId)),
+      `deleting gallery photo ${cleanId}`
+    );
+    bumpCloudPublishVersionDebounced();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `galleryPhotos/${cleanId}`);
+  }
+}
+
+export async function upsertFeaturedWeddingPhotoCloud(
+  weddingId: string,
+  photo: FeaturedWeddingPhoto,
+  sortOrder = -Date.now()
+): Promise<void> {
+  if (!canWriteCloud() || !photo.url?.trim()) return;
+  const cleanWeddingId = sanitizeDocId(weddingId);
+  const cleanPhotoId = sanitizeDocId(photo.id);
+  try {
+    const safeUrl = await compressDataUrlIfNeeded(photo.url, 260000);
+    await withTimeout(
+      setDoc(
+        doc(db, 'featuredWeddings', cleanWeddingId, 'photos', cleanPhotoId),
+        buildFeaturedWeddingPhotoPayload(cleanWeddingId, { ...photo, url: safeUrl }, sortOrder)
+      ),
+      `saving featured wedding photo`
+    );
+    bumpCloudPublishVersionDebounced();
+  } catch (error) {
+    handleFirestoreError(
+      error,
+      OperationType.WRITE,
+      `featuredWeddings/${cleanWeddingId}/photos/${cleanPhotoId}`
+    );
+  }
+}
+
+export async function deleteFeaturedWeddingPhotoCloud(
+  weddingId: string,
+  photoId: string
+): Promise<void> {
+  if (!canWriteCloud()) return;
+  const cleanWeddingId = sanitizeDocId(weddingId);
+  const cleanPhotoId = sanitizeDocId(photoId);
+  try {
+    await withTimeout(
+      deleteDoc(doc(db, 'featuredWeddings', cleanWeddingId, 'photos', cleanPhotoId)),
+      `deleting featured wedding photo`
+    );
+    bumpCloudPublishVersionDebounced();
+  } catch (error) {
+    handleFirestoreError(
+      error,
+      OperationType.DELETE,
+      `featuredWeddings/${cleanWeddingId}/photos/${cleanPhotoId}`
+    );
+  }
+}
+
+export async function upsertVaultPhotoCloud(
+  photo: VaultPhoto,
+  sortOrder = -Date.now()
+): Promise<void> {
+  if (!canWriteCloud() || !photo.url?.trim()) return;
+  const cleanId = sanitizeDocId(photo.id);
+  try {
+    const safeUrl = await compressDataUrlIfNeeded(photo.url, 260000);
+    await withTimeout(
+      setDoc(doc(db, 'vaultPhotos', cleanId), buildVaultPhotoPayload({ ...photo, url: safeUrl }, sortOrder)),
+      `saving vault photo`
+    );
+    bumpCloudPublishVersionDebounced();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `vaultPhotos/${cleanId}`);
+  }
+}
+
+export async function deleteVaultPhotoCloud(photoId: string): Promise<void> {
+  if (!canWriteCloud()) return;
+  const cleanId = sanitizeDocId(photoId);
+  try {
+    await withTimeout(
+      deleteDoc(doc(db, 'vaultPhotos', cleanId)),
+      `deleting vault photo`
+    );
+    bumpCloudPublishVersionDebounced();
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, `vaultPhotos/${cleanId}`);
+  }
+}
+
+// --- Full Collection Sync Helpers (Batched & ID-Projected) ---
 
 async function replaceCollectionDocs<T extends { id: string }>(
   colName: string,
@@ -762,22 +1085,32 @@ async function replaceCollectionDocs<T extends { id: string }>(
 ): Promise<void> {
   if (!canWriteCloud()) return;
   try {
-    const existingSnap = await getDocs(collection(db, colName));
     const nextIds = new Set(items.map(item => sanitizeDocId(item.id)));
 
-    for (const d of existingSnap.docs) {
-      if (!nextIds.has(d.id)) {
-        await deleteDoc(d.ref);
+    // Use lightweight ID-only projection so we NEVER download megabytes of base64 images just to diff deletions
+    const existingIds = await fetchExistingDocIdsLightweight(colName);
+    if (existingIds) {
+      const staleIds = existingIds.filter(id => !nextIds.has(id));
+      if (staleIds.length > 0) {
+        await runInBatches(staleIds, WRITE_CONCURRENCY, async staleId => {
+          await withTimeout(deleteDoc(doc(db, colName, staleId)), `removing old ${colName}/${staleId}`);
+        });
       }
     }
 
-    for (let index = 0; index < items.length; index++) {
-      const item = items[index];
-      const cleanId = sanitizeDocId(item.id);
-      const payload = await buildPayload(item, index);
-      await setDoc(doc(db, colName, cleanId), payload);
-      onItemProgress?.(index + 1, items.length);
-    }
+    await runInBatches(
+      items,
+      WRITE_CONCURRENCY,
+      async (item, index) => {
+        const cleanId = sanitizeDocId(item.id);
+        const payload = await buildPayload(item, index);
+        await withTimeout(
+          setDoc(doc(db, colName, cleanId), payload),
+          `saving ${colName} (${index + 1}/${items.length})`
+        );
+      },
+      onItemProgress
+    );
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, colName);
   }
@@ -797,6 +1130,7 @@ export async function syncGalleryPhotosToCloud(
     },
     onProgress
   );
+  bumpCloudPublishVersionDebounced();
 }
 
 export async function syncFeaturedWeddingsToCloud(
@@ -806,12 +1140,15 @@ export async function syncFeaturedWeddingsToCloud(
   if (!canWriteCloud()) return;
   const sliced = weddings.slice(0, 3);
   try {
-    const existingWeddingsSnap = await getDocs(collection(db, 'featuredWeddings'));
     const nextWeddingIds = new Set(sliced.map(w => sanitizeDocId(w.id)));
-
-    for (const d of existingWeddingsSnap.docs) {
-      if (!nextWeddingIds.has(d.id)) {
-        await deleteDoc(d.ref);
+    const existingWeddingIds = await fetchExistingDocIdsLightweight('featuredWeddings');
+    if (existingWeddingIds) {
+      const staleWeddingIds = existingWeddingIds.filter(id => !nextWeddingIds.has(id));
+      for (const staleId of staleWeddingIds) {
+        await withTimeout(
+          deleteDoc(doc(db, 'featuredWeddings', staleId)),
+          `removing old featured wedding ${staleId}`
+        );
       }
     }
 
@@ -824,34 +1161,47 @@ export async function syncFeaturedWeddingsToCloud(
       );
 
       onProgress?.(`Featured Wedding ${wIdx + 1}/${sliced.length}`);
-      await setDoc(
-        doc(db, 'featuredWeddings', cleanWeddingId),
-        buildFeaturedWeddingPayload({ ...wedding, coverImage: safeCover }, wIdx)
+      await withTimeout(
+        setDoc(
+          doc(db, 'featuredWeddings', cleanWeddingId),
+          buildFeaturedWeddingPayload({ ...wedding, coverImage: safeCover }, wIdx)
+        ),
+        `saving featured wedding ${wIdx + 1}`
       );
 
-      const subCol = collection(db, 'featuredWeddings', cleanWeddingId, 'photos');
-      const existingPhotosSnap = await getDocs(subCol);
       const validPhotos = (wedding.photos || []).filter(
         p => typeof p.url === 'string' && p.url.trim().length > 0
       );
       const nextPhotoIds = new Set(validPhotos.map(p => sanitizeDocId(p.id)));
-
-      for (const pd of existingPhotosSnap.docs) {
-        if (!nextPhotoIds.has(pd.id)) {
-          await deleteDoc(pd.ref);
+      const existingPhotoIds = await fetchExistingDocIdsLightweight(
+        'photos',
+        `featuredWeddings/${cleanWeddingId}`
+      );
+      if (existingPhotoIds) {
+        const stalePhotoIds = existingPhotoIds.filter(id => !nextPhotoIds.has(id));
+        if (stalePhotoIds.length > 0) {
+          await runInBatches(stalePhotoIds, WRITE_CONCURRENCY, async staleId => {
+            await withTimeout(
+              deleteDoc(doc(db, 'featuredWeddings', cleanWeddingId, 'photos', staleId)),
+              `removing old featured wedding photo`
+            );
+          });
         }
       }
 
-      for (let pIdx = 0; pIdx < validPhotos.length; pIdx++) {
-        const photo = validPhotos[pIdx];
+      await runInBatches(validPhotos, WRITE_CONCURRENCY, async (photo, pIdx) => {
         const cleanPhotoId = sanitizeDocId(photo.id);
         const safePhotoUrl = await compressDataUrlIfNeeded(photo.url, 260000);
-        await setDoc(
-          doc(db, 'featuredWeddings', cleanWeddingId, 'photos', cleanPhotoId),
-          buildFeaturedWeddingPhotoPayload(cleanWeddingId, { ...photo, url: safePhotoUrl }, pIdx)
+        await withTimeout(
+          setDoc(
+            doc(db, 'featuredWeddings', cleanWeddingId, 'photos', cleanPhotoId),
+            buildFeaturedWeddingPhotoPayload(cleanWeddingId, { ...photo, url: safePhotoUrl }, pIdx)
+          ),
+          `saving featured wedding ${wIdx + 1} photo ${pIdx + 1}/${validPhotos.length}`
         );
-      }
+      });
     }
+    bumpCloudPublishVersionDebounced();
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, 'featuredWeddings');
   }
@@ -865,7 +1215,10 @@ export function syncFeaturedWeddingsToCloudDebounced(weddings: FeaturedWedding[]
 export async function syncPricingToCloud(packages: PricingPackage[]): Promise<void> {
   if (!canWriteCloud()) return;
   try {
-    await setDoc(doc(db, 'studioConfig', 'pricing'), buildPricingPayload(packages));
+    await withTimeout(
+      setDoc(doc(db, 'studioConfig', 'pricing'), buildPricingPayload(packages)),
+      'saving pricing packages'
+    );
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, 'studioConfig/pricing');
   }
@@ -884,15 +1237,19 @@ export async function syncAboutContentToCloud(about: AboutContent): Promise<void
       compressDataUrlIfNeeded(about.homepageImage || INITIAL_ABOUT_CONTENT.homepageImage, 180000),
       compressDataUrlIfNeeded(about.storyImage || INITIAL_ABOUT_CONTENT.storyImage, 180000),
     ]);
-    await setDoc(
-      doc(db, 'studioConfig', 'about'),
-      buildAboutPayload({
-        ...about,
-        homepageHeroImage: safeHero,
-        homepageImage: safeHome,
-        storyImage: safeStory,
-      })
+    await withTimeout(
+      setDoc(
+        doc(db, 'studioConfig', 'about'),
+        buildAboutPayload({
+          ...about,
+          homepageHeroImage: safeHero,
+          homepageImage: safeHome,
+          storyImage: safeStory,
+        })
+      ),
+      'saving homepage & about content'
     );
+    bumpCloudPublishVersionDebounced();
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, 'studioConfig/about');
   }
@@ -905,6 +1262,7 @@ export function syncAboutContentToCloudDebounced(about: AboutContent): void {
 
 export async function syncFaqsToCloud(faqs: FaqItem[]): Promise<void> {
   await replaceCollectionDocs('faqs', faqs, buildFaqPayload);
+  bumpCloudPublishVersionDebounced();
 }
 
 export function syncFaqsToCloudDebounced(faqs: FaqItem[]): void {
@@ -914,6 +1272,7 @@ export function syncFaqsToCloudDebounced(faqs: FaqItem[]): void {
 
 export async function syncReviewsToCloud(reviews: Review[]): Promise<void> {
   await replaceCollectionDocs('reviews', reviews, buildReviewPayload);
+  bumpCloudPublishVersionDebounced();
 }
 
 export function syncReviewsToCloudDebounced(reviews: Review[]): void {
@@ -929,6 +1288,7 @@ export async function syncBlogPostsToCloud(posts: BlogPost[]): Promise<void> {
     );
     return buildBlogPostPayload({ ...post, coverImage: safeCover }, idx);
   });
+  bumpCloudPublishVersionDebounced();
 }
 
 export function syncBlogPostsToCloudDebounced(posts: BlogPost[]): void {
@@ -939,7 +1299,11 @@ export function syncBlogPostsToCloudDebounced(posts: BlogPost[]): void {
 export async function syncVaultContentToCloud(vault: GuestVaultContent): Promise<void> {
   if (!canWriteCloud()) return;
   try {
-    await setDoc(doc(db, 'studioConfig', 'vault'), buildVaultConfigPayload(vault));
+    await withTimeout(
+      setDoc(doc(db, 'studioConfig', 'vault'), buildVaultConfigPayload(vault)),
+      'saving guest photo vault settings'
+    );
+    bumpCloudPublishVersionDebounced();
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, 'studioConfig/vault');
   }
@@ -956,6 +1320,7 @@ export async function syncVaultPhotosToCloud(photos: VaultPhoto[]): Promise<void
     const safeUrl = await compressDataUrlIfNeeded(photo.url, 260000);
     return buildVaultPhotoPayload({ ...photo, url: safeUrl }, idx);
   });
+  bumpCloudPublishVersionDebounced();
 }
 
 export function syncVaultPhotosToCloudDebounced(photos: VaultPhoto[]): void {
@@ -967,7 +1332,8 @@ export async function deleteSingleDocCloud(colPath: string, docId: string): Prom
   if (!canWriteCloud()) return;
   const cleanId = sanitizeDocId(docId);
   try {
-    await deleteDoc(doc(db, colPath, cleanId));
+    await withTimeout(deleteDoc(doc(db, colPath, cleanId)), `deleting ${colPath}/${cleanId}`);
+    bumpCloudPublishVersionDebounced();
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `${colPath}/${cleanId}`);
   }
@@ -975,7 +1341,8 @@ export async function deleteSingleDocCloud(colPath: string, docId: string): Prom
 
 /**
  * Publishes the entire current studio state (homepage, featured weddings, gallery,
- * pricing, about/reviews/blog/faqs, and guest vault) to Cloud Firestore with progress feedback.
+ * pricing, about/reviews/blog/faqs, and guest vault) to Cloud Firestore in fast
+ * parallel batches with live progress percentage and instant visitor cache invalidation.
  */
 export async function publishAllStudioDataToCloud(
   payload: {
@@ -989,46 +1356,65 @@ export async function publishAllStudioDataToCloud(
     vaultContent: GuestVaultContent;
     vaultPhotos: VaultPhoto[];
   },
-  onProgress?: (message: string) => void
+  onProgress?: (message: string, percent?: number) => void
 ): Promise<void> {
   if (!canWriteCloud()) {
     throw new Error('Please sign in with your Studio Owner Google account to publish live changes.');
   }
 
+  // Refresh auth token before starting so a long-open admin tab never stalls on an expired token
+  try {
+    await withTimeout(
+      auth.currentUser?.getIdToken(true) ?? Promise.resolve(''),
+      'verifying Studio Owner session',
+      10000
+    );
+  } catch {
+    // Proceed with current token if refresh is temporarily offline
+  }
+
   debounceTimers.forEach(timer => clearTimeout(timer));
   debounceTimers.clear();
 
-  onProgress?.('Publishing Homepage & About Us...');
+  onProgress?.('Publishing Homepage & About Us...', 8);
   await syncAboutContentToCloud(payload.aboutContent);
 
-  onProgress?.('Publishing Pricing Packages...');
-  await syncPricingToCloud(payload.pricingPackages);
-
-  onProgress?.('Publishing Guest Photo Vault text...');
+  onProgress?.('Publishing Guest Photo Vault settings...', 16);
   await syncVaultContentToCloud(payload.vaultContent);
 
-  onProgress?.(`Publishing Wedding Gallery (${payload.galleryPhotos.length} photos)...`);
+  const totalGallery = payload.galleryPhotos.filter(p => p.url?.trim()).length;
+  onProgress?.(`Publishing Wedding Gallery (0/${totalGallery})...`, 20);
   await syncGalleryPhotosToCloud(payload.galleryPhotos, (curr, total) => {
-    onProgress?.(`Publishing Wedding Gallery (${curr}/${total})...`);
+    const pct = total > 0 ? Math.round(20 + (curr / total) * 42) : 62;
+    onProgress?.(`Publishing Wedding Gallery (${curr}/${total})...`, pct);
   });
 
-  onProgress?.('Publishing Featured Weddings...');
+  onProgress?.('Publishing 3 Featured Weddings...', 66);
   await syncFeaturedWeddingsToCloud(payload.featuredWeddings, label => {
-    onProgress?.(`Publishing ${label}...`);
+    onProgress?.(`Publishing ${label}...`, 74);
   });
 
-  onProgress?.('Publishing FAQs, Reviews & Blog...');
-  await syncFaqsToCloud(payload.faqs);
-  await syncReviewsToCloud(payload.reviews);
-  await syncBlogPostsToCloud(payload.blogPosts);
+  onProgress?.('Publishing FAQs, Reviews & Blog...', 82);
+  await Promise.all([
+    syncFaqsToCloud(payload.faqs),
+    syncReviewsToCloud(payload.reviews),
+    syncBlogPostsToCloud(payload.blogPosts),
+  ]);
 
-  onProgress?.('Publishing Guest Vault Photos...');
+  onProgress?.('Publishing Guest Vault Photos...', 90);
   await syncVaultPhotosToCloud(payload.vaultPhotos);
 
-  // Mark all sections freshly synced so immediate reloads use local IndexedDB cache
-  markSectionSynced('aboutBundle');
-  markSectionSynced('pricing');
-  markSectionSynced('vaultBundle');
-  markSectionSynced('galleryPhotos');
-  markSectionSynced('featuredWeddings');
+  // Cancel any queued debounced bump and write `studioConfig/pricing` LAST so its
+  // serverTimestamp is guaranteed to be newer than every photo written above!
+  debounceTimers.forEach(timer => clearTimeout(timer));
+  debounceTimers.clear();
+
+  onProgress?.('Finalizing live website version...', 96);
+  await syncPricingToCloud(payload.pricingPackages);
+
+  const publishedAt = Date.now();
+  for (const sec of ['pricing', 'galleryPhotos', 'featuredWeddings', 'aboutBundle', 'vaultBundle']) {
+    setStoredSectionVersion(sec, publishedAt);
+  }
+  onProgress?.('All changes published live!', 100);
 }
