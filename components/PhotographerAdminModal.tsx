@@ -192,6 +192,7 @@ export default function PhotographerAdminModal({
   const [authUser, setAuthUser] = useState<User | null>(null);
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [isPublishingLive, setIsPublishingLive] = useState(false);
+  const [isUploadingSingleImage, setIsUploadingSingleImage] = useState(false);
   const [publishProgressMsg, setPublishProgressMsg] = useState('');
   const [publishPercent, setPublishPercent] = useState(0);
   const [cloudErrorMsg, setCloudErrorMsg] = useState('');
@@ -323,18 +324,31 @@ export default function PhotographerAdminModal({
 
   const handleFileUpload = async (
     e: React.ChangeEvent<HTMLInputElement>,
-    callback: (url: string) => void
+    callback: (url: string) => void,
+    options?: { maxChars?: number; successMessage?: string }
   ) => {
     const file = e.target.files?.[0];
     e.target.value = '';
     if (!file) return;
 
+    setIsUploadingSingleImage(true);
+    setCloudErrorMsg('');
     try {
-      const optimizedUrl = await optimizeUploadedImage(file, 1280, 0.78, 240000);
+      const targetMaxChars = options?.maxChars ?? 220000;
+      const optimizedUrl = await optimizeUploadedImage(file, 1280, 0.78, targetMaxChars);
       callback(optimizedUrl);
+      if (options?.successMessage) {
+        showSuccess(options.successMessage);
+      }
     } catch (err) {
       console.error('Failed to process uploaded image:', err);
-      showSuccess('Could not read the selected image file. Please try another photo.');
+      const errMsg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Could not read the selected image file. Please try uploading a JPG, PNG, or WebP photo.';
+      setCloudErrorMsg(errMsg);
+    } finally {
+      setIsUploadingSingleImage(false);
     }
   };
 
@@ -1723,43 +1737,75 @@ export default function PhotographerAdminModal({
                     </div>
 
                     <div>
-                      <label className="block text-xs font-semibold uppercase tracking-wider text-stone-700 mb-1">
-                        Homepage Photographer Portrait
-                      </label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-xs font-semibold uppercase tracking-wider text-stone-700">
+                          Homepage Photographer Portrait
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onUpdateAboutContent({ homepageImage: INITIAL_ABOUT_CONTENT.homepageImage });
+                            showSuccess('Homepage Photographer Portrait reset to default.');
+                          }}
+                          className="text-[11px] text-stone-500 hover:text-stone-900 underline"
+                        >
+                          Reset to Default
+                        </button>
+                      </div>
                       <div className="flex flex-col sm:flex-row gap-4 items-center">
                         <div className="relative w-28 h-20 rounded overflow-hidden border border-stone-300 shrink-0 bg-stone-100">
                           <Image
-                            src={aboutContent.homepageImage}
+                            src={aboutContent.homepageImage || INITIAL_ABOUT_CONTENT.homepageImage}
                             alt="Homepage About preview"
                             fill
                             className="object-cover"
                             referrerPolicy="no-referrer"
                             unoptimized={
-                              aboutContent.homepageImage.startsWith('data:') ||
-                              aboutContent.homepageImage.startsWith('blob:')
+                              (aboutContent.homepageImage || '').startsWith('data:') ||
+                              (aboutContent.homepageImage || '').startsWith('blob:')
                             }
                           />
                         </div>
                         <div className="flex-1 w-full space-y-2">
                           <input
                             type="text"
-                            value={aboutContent.homepageImage.startsWith('data:') ? '' : aboutContent.homepageImage}
+                            value={
+                              (aboutContent.homepageImage || '').startsWith('data:')
+                                ? ''
+                                : aboutContent.homepageImage || ''
+                            }
                             onChange={e => onUpdateAboutContent({ homepageImage: e.target.value })}
                             placeholder={
-                              aboutContent.homepageImage.startsWith('data:')
+                              (aboutContent.homepageImage || '').startsWith('data:')
                                 ? 'Uploaded photo active (paste new URL to replace)'
                                 : 'Paste image URL...'
                             }
                             className="w-full text-xs border border-stone-300 rounded px-3 py-2 bg-white"
                           />
                           <label className="inline-flex items-center gap-1.5 text-xs text-stone-700 hover:text-stone-900 border border-dashed border-stone-300 px-3 py-1.5 rounded cursor-pointer hover:bg-stone-100 bg-white">
-                            <Upload className="w-3.5 h-3.5 text-stone-500" />
-                            <span>Upload new photo from computer</span>
+                            {isUploadingSingleImage ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c2a378]" />
+                            ) : (
+                              <Upload className="w-3.5 h-3.5 text-stone-500" />
+                            )}
+                            <span>{isUploadingSingleImage ? 'Processing photo...' : 'Upload new photo from computer'}</span>
                             <input
                               type="file"
                               accept="image/*"
+                              disabled={isUploadingSingleImage}
                               className="hidden"
-                              onChange={e => handleFileUpload(e, url => onUpdateAboutContent({ homepageImage: url }))}
+                              onChange={e =>
+                                handleFileUpload(
+                                  e,
+                                  url => onUpdateAboutContent({ homepageImage: url }),
+                                  {
+                                    maxChars: 175000,
+                                    successMessage: isStudioAdmin
+                                      ? 'Homepage Photographer Portrait updated and syncing live!'
+                                      : 'Homepage Photographer Portrait updated! Sign in above to publish live.',
+                                  }
+                                )
+                              }
                             />
                           </label>
                         </div>
@@ -1823,43 +1869,75 @@ export default function PhotographerAdminModal({
                     </div>
 
                     <div>
-                      <label className="block text-xs font-semibold uppercase tracking-wider text-stone-700 mb-1">
-                        About Page Feature Image
-                      </label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="block text-xs font-semibold uppercase tracking-wider text-stone-700">
+                          About Page Feature Image
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onUpdateAboutContent({ storyImage: INITIAL_ABOUT_CONTENT.storyImage });
+                            showSuccess('About Page Feature Image reset to default.');
+                          }}
+                          className="text-[11px] text-stone-500 hover:text-stone-900 underline"
+                        >
+                          Reset to Default
+                        </button>
+                      </div>
                       <div className="flex flex-col sm:flex-row gap-4 items-center">
                         <div className="relative w-24 h-28 rounded overflow-hidden border border-stone-300 shrink-0 bg-stone-100">
                           <Image
-                            src={aboutContent.storyImage}
+                            src={aboutContent.storyImage || INITIAL_ABOUT_CONTENT.storyImage}
                             alt="Story feature preview"
                             fill
                             className="object-cover"
                             referrerPolicy="no-referrer"
                             unoptimized={
-                              aboutContent.storyImage.startsWith('data:') ||
-                              aboutContent.storyImage.startsWith('blob:')
+                              (aboutContent.storyImage || '').startsWith('data:') ||
+                              (aboutContent.storyImage || '').startsWith('blob:')
                             }
                           />
                         </div>
                         <div className="flex-1 w-full space-y-2">
                           <input
                             type="text"
-                            value={aboutContent.storyImage.startsWith('data:') ? '' : aboutContent.storyImage}
+                            value={
+                              (aboutContent.storyImage || '').startsWith('data:')
+                                ? ''
+                                : aboutContent.storyImage || ''
+                            }
                             onChange={e => onUpdateAboutContent({ storyImage: e.target.value })}
                             placeholder={
-                              aboutContent.storyImage.startsWith('data:')
+                              (aboutContent.storyImage || '').startsWith('data:')
                                 ? 'Uploaded photo active (paste new URL to replace)'
                                 : 'Paste image URL...'
                             }
                             className="w-full text-xs border border-stone-300 rounded px-3 py-2"
                           />
                           <label className="inline-flex items-center gap-1.5 text-xs text-stone-700 hover:text-stone-900 border border-dashed border-stone-300 px-3 py-1.5 rounded cursor-pointer hover:bg-stone-50">
-                            <Upload className="w-3.5 h-3.5 text-stone-500" />
-                            <span>Upload new story photo</span>
+                            {isUploadingSingleImage ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c2a378]" />
+                            ) : (
+                              <Upload className="w-3.5 h-3.5 text-stone-500" />
+                            )}
+                            <span>{isUploadingSingleImage ? 'Processing photo...' : 'Upload new story photo'}</span>
                             <input
                               type="file"
                               accept="image/*"
+                              disabled={isUploadingSingleImage}
                               className="hidden"
-                              onChange={e => handleFileUpload(e, url => onUpdateAboutContent({ storyImage: url }))}
+                              onChange={e =>
+                                handleFileUpload(
+                                  e,
+                                  url => onUpdateAboutContent({ storyImage: url }),
+                                  {
+                                    maxChars: 175000,
+                                    successMessage: isStudioAdmin
+                                      ? 'About Page Feature Image updated and syncing live!'
+                                      : 'About Page Feature Image updated! Sign in above to publish live.',
+                                  }
+                                )
+                              }
                             />
                           </label>
                         </div>

@@ -2,7 +2,7 @@
 
 import Image from 'next/image';
 import { Pencil, Star, ChevronRight } from 'lucide-react';
-import { AboutContent } from '@/lib/wedding-data';
+import { AboutContent, INITIAL_ABOUT_CONTENT } from '@/lib/wedding-data';
 
 interface AboutIntroSectionProps {
   aboutContent: AboutContent;
@@ -45,12 +45,15 @@ export default function AboutIntroSection({
           {/* Column 2: Photographer in Action Photo */}
           <div className="md:col-span-4 relative min-h-[280px] sm:min-h-[340px] rounded-xs overflow-hidden group shadow-xs">
             <Image
-              src={aboutContent.homepageImage}
+              src={aboutContent.homepageImage || INITIAL_ABOUT_CONTENT.homepageImage}
               alt="MMC photographer capturing couple moments outdoors"
               fill
               className="object-cover object-center transition-transform duration-500 group-hover:scale-103"
               referrerPolicy="no-referrer"
-              unoptimized={aboutContent.homepageImage.startsWith('data:') || aboutContent.homepageImage.startsWith('blob:')}
+              unoptimized={
+                (aboutContent.homepageImage || '').startsWith('data:') ||
+                (aboutContent.homepageImage || '').startsWith('blob:')
+              }
             />
             <div className="absolute inset-0 bg-stone-900/10 pointer-events-none" />
           </div>

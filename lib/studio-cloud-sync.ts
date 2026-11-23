@@ -1232,10 +1232,22 @@ export function syncPricingToCloudDebounced(packages: PricingPackage[]): void {
 export async function syncAboutContentToCloud(about: AboutContent): Promise<void> {
   if (!canWriteCloud()) return;
   try {
+    const sanitizeAboutImage = async (candidate: string | undefined, fallback: string): Promise<string> => {
+      const trimmed = (candidate || '').trim();
+      if (!trimmed) return fallback;
+      if (!trimmed.startsWith('data:image/')) return trimmed;
+      const compressed = await compressDataUrlIfNeeded(trimmed, 180000);
+      // Guard against previously truncated/corrupted 450,000-char base64 strings that cannot be decoded
+      if (compressed.length >= 440000) {
+        return fallback;
+      }
+      return compressed;
+    };
+
     const [safeHero, safeHome, safeStory] = await Promise.all([
-      compressDataUrlIfNeeded(about.homepageHeroImage || INITIAL_ABOUT_CONTENT.homepageHeroImage, 180000),
-      compressDataUrlIfNeeded(about.homepageImage || INITIAL_ABOUT_CONTENT.homepageImage, 180000),
-      compressDataUrlIfNeeded(about.storyImage || INITIAL_ABOUT_CONTENT.storyImage, 180000),
+      sanitizeAboutImage(about.homepageHeroImage, INITIAL_ABOUT_CONTENT.homepageHeroImage),
+      sanitizeAboutImage(about.homepageImage, INITIAL_ABOUT_CONTENT.homepageImage),
+      sanitizeAboutImage(about.storyImage, INITIAL_ABOUT_CONTENT.storyImage),
     ]);
     await withTimeout(
       setDoc(

@@ -3,7 +3,7 @@
 import { useState } from 'react';
 import Image from 'next/image';
 import { Heart, Camera, Clock, ShieldCheck, ChevronDown } from 'lucide-react';
-import { AboutContent, FaqItem } from '@/lib/wedding-data';
+import { AboutContent, FaqItem, INITIAL_ABOUT_CONTENT } from '@/lib/wedding-data';
 
 interface AboutPageProps {
   aboutContent: AboutContent;
@@ -47,12 +47,15 @@ export default function AboutPage({
         <div className="grid grid-cols-1 md:grid-cols-12 gap-8 lg:gap-12 items-center">
           <div className="md:col-span-6 relative aspect-[4/5] rounded-xs overflow-hidden shadow-sm">
             <Image
-              src={aboutContent.storyImage}
+              src={aboutContent.storyImage || INITIAL_ABOUT_CONTENT.storyImage}
               alt="MMC Photographer capturing wedding moments"
               fill
               className="object-cover"
               referrerPolicy="no-referrer"
-              unoptimized={aboutContent.storyImage.startsWith('data:') || aboutContent.storyImage.startsWith('blob:')}
+              unoptimized={
+                (aboutContent.storyImage || '').startsWith('data:') ||
+                (aboutContent.storyImage || '').startsWith('blob:')
+              }
             />
           </div>
 
