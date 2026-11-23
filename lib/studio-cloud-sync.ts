@@ -47,7 +47,7 @@ const VALID_GALLERY_CATEGORIES = new Set<GalleryPhoto['category']>([
   'dancing',
 ]);
 
-const WRITE_TIMEOUT_MS = 25000;
+const WRITE_TIMEOUT_MS = 12000;
 const WRITE_CONCURRENCY = 5;
 
 function canWriteCloud(): boolean {
@@ -57,7 +57,11 @@ function canWriteCloud(): boolean {
 function withTimeout<T>(promise: Promise<T>, label: string, ms = WRITE_TIMEOUT_MS): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
-      reject(new Error(`Timed out while ${label}. Please check your connection and try again.`));
+      reject(
+        new Error(
+          `Timed out while ${label}. Your Firebase Firestore daily free-tier quota may be exhausted, or the connection was interrupted.`
+        )
+      );
     }, ms);
     promise.then(
       val => {
@@ -1236,7 +1240,7 @@ export async function syncAboutContentToCloud(about: AboutContent): Promise<void
       const trimmed = (candidate || '').trim();
       if (!trimmed) return fallback;
       if (!trimmed.startsWith('data:image/')) return trimmed;
-      const compressed = await compressDataUrlIfNeeded(trimmed, 180000);
+      const compressed = await compressDataUrlIfNeeded(trimmed, 140000);
       // Guard against previously truncated/corrupted 450,000-char base64 strings that cannot be decoded
       if (compressed.length >= 440000) {
         return fallback;
@@ -1351,6 +1355,140 @@ export async function deleteSingleDocCloud(colPath: string, docId: string): Prom
   }
 }
 
+async function prepareCloudPublishSession(): Promise<void> {
+  if (!canWriteCloud()) {
+    throw new Error('Please sign in with your Studio Owner Google account to publish live changes.');
+  }
+
+  // Refresh auth token before starting so a long-open admin tab never stalls on an expired token
+  try {
+    await withTimeout(
+      auth.currentUser?.getIdToken(true) ?? Promise.resolve(''),
+      'verifying Studio Owner session',
+      6000
+    );
+  } catch {
+    // Proceed with current token if refresh is temporarily slow
+  }
+
+  debounceTimers.forEach(timer => clearTimeout(timer));
+  debounceTimers.clear();
+}
+
+function clearPendingDebouncedWrites(): void {
+  debounceTimers.forEach(timer => clearTimeout(timer));
+  debounceTimers.clear();
+}
+
+/**
+ * Fast targeted publish for ONLY the About Us page text/photos & Homepage photos.
+ * Performs 0 collection reads and only 2 tiny document writes (`studioConfig/about`
+ * + `studioConfig/pricing` version bump), finishing in ~1 second instead of
+ * re-uploading the entire wedding gallery.
+ */
+export async function publishAboutPageOnlyToCloud(
+  payload: {
+    aboutContent: AboutContent;
+    pricingPackages: PricingPackage[];
+  },
+  onProgress?: (message: string, percent?: number) => void
+): Promise<void> {
+  await prepareCloudPublishSession();
+
+  onProgress?.('Optimizing & publishing Homepage & About Us...', 35);
+  await syncAboutContentToCloud(payload.aboutContent);
+
+  clearPendingDebouncedWrites();
+  onProgress?.('Finalizing live website version...', 80);
+  await syncPricingToCloud(payload.pricingPackages);
+
+  const publishedAt = Date.now();
+  setStoredSectionVersion('aboutBundle', publishedAt);
+  setStoredSectionVersion('pricing', publishedAt);
+  onProgress?.('About Us & Homepage changes published live!', 100);
+}
+
+/**
+ * Targeted publish for the About Us tab including Reviews, Blog Posts, and FAQs
+ * (skips all Wedding Gallery and Featured Wedding photos).
+ */
+export async function publishAboutSectionToCloud(
+  payload: {
+    aboutContent: AboutContent;
+    faqs: FaqItem[];
+    reviews: Review[];
+    blogPosts: BlogPost[];
+    pricingPackages: PricingPackage[];
+  },
+  onProgress?: (message: string, percent?: number) => void
+): Promise<void> {
+  await prepareCloudPublishSession();
+
+  onProgress?.('Publishing About Us & Homepage...', 22);
+  await syncAboutContentToCloud(payload.aboutContent);
+
+  onProgress?.('Publishing FAQs, Reviews & Blog...', 55);
+  await Promise.all([
+    syncFaqsToCloud(payload.faqs),
+    syncReviewsToCloud(payload.reviews),
+    syncBlogPostsToCloud(payload.blogPosts),
+  ]);
+
+  clearPendingDebouncedWrites();
+  onProgress?.('Finalizing live website version...', 88);
+  await syncPricingToCloud(payload.pricingPackages);
+
+  const publishedAt = Date.now();
+  setStoredSectionVersion('aboutBundle', publishedAt);
+  setStoredSectionVersion('pricing', publishedAt);
+  onProgress?.('About Us section published live!', 100);
+}
+
+/**
+ * Targeted publish for ONLY the Guest Photo Vault settings & snaps.
+ */
+export async function publishVaultSectionToCloud(
+  payload: {
+    vaultContent: GuestVaultContent;
+    vaultPhotos: VaultPhoto[];
+    pricingPackages: PricingPackage[];
+  },
+  onProgress?: (message: string, percent?: number) => void
+): Promise<void> {
+  await prepareCloudPublishSession();
+
+  onProgress?.('Publishing Guest Photo Vault settings...', 25);
+  await syncVaultContentToCloud(payload.vaultContent);
+
+  onProgress?.('Publishing Guest Photo Vault photos...', 60);
+  await syncVaultPhotosToCloud(payload.vaultPhotos);
+
+  clearPendingDebouncedWrites();
+  onProgress?.('Finalizing live website version...', 88);
+  await syncPricingToCloud(payload.pricingPackages);
+
+  const publishedAt = Date.now();
+  setStoredSectionVersion('vaultBundle', publishedAt);
+  setStoredSectionVersion('pricing', publishedAt);
+  onProgress?.('Guest Photo Vault changes published live!', 100);
+}
+
+/**
+ * Fast targeted publish for ONLY the Investment / Pricing packages (1 tiny write).
+ */
+export async function publishPricingOnlyToCloud(
+  pricingPackages: PricingPackage[],
+  onProgress?: (message: string, percent?: number) => void
+): Promise<void> {
+  await prepareCloudPublishSession();
+
+  onProgress?.('Publishing Investment & Pricing packages...', 50);
+  await syncPricingToCloud(pricingPackages);
+
+  setStoredSectionVersion('pricing', Date.now());
+  onProgress?.('Pricing packages published live!', 100);
+}
+
 /**
  * Publishes the entire current studio state (homepage, featured weddings, gallery,
  * pricing, about/reviews/blog/faqs, and guest vault) to Cloud Firestore in fast
@@ -1370,23 +1508,7 @@ export async function publishAllStudioDataToCloud(
   },
   onProgress?: (message: string, percent?: number) => void
 ): Promise<void> {
-  if (!canWriteCloud()) {
-    throw new Error('Please sign in with your Studio Owner Google account to publish live changes.');
-  }
-
-  // Refresh auth token before starting so a long-open admin tab never stalls on an expired token
-  try {
-    await withTimeout(
-      auth.currentUser?.getIdToken(true) ?? Promise.resolve(''),
-      'verifying Studio Owner session',
-      10000
-    );
-  } catch {
-    // Proceed with current token if refresh is temporarily offline
-  }
-
-  debounceTimers.forEach(timer => clearTimeout(timer));
-  debounceTimers.clear();
+  await prepareCloudPublishSession();
 
   onProgress?.('Publishing Homepage & About Us...', 8);
   await syncAboutContentToCloud(payload.aboutContent);
@@ -1418,8 +1540,7 @@ export async function publishAllStudioDataToCloud(
 
   // Cancel any queued debounced bump and write `studioConfig/pricing` LAST so its
   // serverTimestamp is guaranteed to be newer than every photo written above!
-  debounceTimers.forEach(timer => clearTimeout(timer));
-  debounceTimers.clear();
+  clearPendingDebouncedWrites();
 
   onProgress?.('Finalizing live website version...', 96);
   await syncPricingToCloud(payload.pricingPackages);

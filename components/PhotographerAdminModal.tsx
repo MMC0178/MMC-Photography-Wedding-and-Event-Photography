@@ -26,6 +26,7 @@ import {
   AlertCircle,
   Loader2,
   RefreshCw,
+  ExternalLink,
 } from 'lucide-react';
 import {
   FeaturedWedding,
@@ -50,8 +51,15 @@ import {
 } from '@/lib/firebase';
 import {
   publishAllStudioDataToCloud,
+  publishAboutPageOnlyToCloud,
+  publishAboutSectionToCloud,
+  publishVaultSectionToCloud,
+  publishPricingOnlyToCloud,
   clearLocalCloudVersionCache,
 } from '@/lib/studio-cloud-sync';
+import firebaseConfig from '../firebase-applet-config.json';
+
+const FIREBASE_QUOTA_UPGRADE_URL = `https://console.firebase.google.com/project/${firebaseConfig.projectId}/firestore/databases/${firebaseConfig.firestoreDatabaseId}/data?openUpgradeDialog=true`;
 
 interface PhotographerAdminModalProps {
   isOpen: boolean;
@@ -196,6 +204,7 @@ export default function PhotographerAdminModal({
   const [publishProgressMsg, setPublishProgressMsg] = useState('');
   const [publishPercent, setPublishPercent] = useState(0);
   const [cloudErrorMsg, setCloudErrorMsg] = useState('');
+  const [cloudErrorIsQuota, setCloudErrorIsQuota] = useState(false);
 
   useEffect(() => {
     const unsub = subscribeStudioAuth(user => {
@@ -224,6 +233,7 @@ export default function PhotographerAdminModal({
 
   const showSuccess = (msg: string, durationMs = 5000) => {
     setCloudErrorMsg('');
+    setCloudErrorIsQuota(false);
     setSaveSuccessMsg(msg);
     setTimeout(() => setSaveSuccessMsg(''), durationMs);
   };
@@ -262,41 +272,29 @@ export default function PhotographerAdminModal({
     showSuccess('Signed out of Studio Cloud Sync.');
   };
 
-  const handlePublishAllLive = async (customSuccessMsg?: string) => {
+  const runCloudPublish = async (
+    task: (onProgress: (status: string, pct?: number) => void) => Promise<void>,
+    successMsg: string
+  ) => {
     if (!isStudioAdmin) {
+      setCloudErrorIsQuota(false);
       setCloudErrorMsg('Please sign in with your Studio Owner Google account above so changes publish live to all visitors.');
       return;
     }
     setIsPublishingLive(true);
     setPublishProgressMsg('Starting live sync...');
-    setPublishPercent(5);
+    setPublishPercent(8);
     setCloudErrorMsg('');
+    setCloudErrorIsQuota(false);
     setSaveSuccessMsg('');
     try {
-      await publishAllStudioDataToCloud(
-        {
-          galleryPhotos,
-          featuredWeddings,
-          pricingPackages,
-          aboutContent,
-          faqs,
-          reviews,
-          blogPosts,
-          vaultContent,
-          vaultPhotos,
-        },
-        (status, pct) => {
-          setPublishProgressMsg(status);
-          if (typeof pct === 'number') {
-            setPublishPercent(pct);
-          }
+      await task((status, pct) => {
+        setPublishProgressMsg(status);
+        if (typeof pct === 'number') {
+          setPublishPercent(pct);
         }
-      );
-      showSuccess(
-        customSuccessMsg ||
-          `All changes published live! (${galleryPhotos.length} gallery photos, ${featuredWeddings.length} featured weddings, pricing & text synced)`,
-        8000
-      );
+      });
+      showSuccess(successMsg, 8000);
     } catch (err) {
       console.error('Failed to publish live changes:', err);
       let detail = '';
@@ -310,16 +308,98 @@ export default function PhotographerAdminModal({
       } else if (err) {
         detail = String(err);
       }
+      const lower = detail.toLowerCase();
+      const looksLikeQuota =
+        lower.includes('quota') ||
+        lower.includes('resource_exhausted') ||
+        lower.includes('429') ||
+        lower.includes('timed out');
+      setCloudErrorIsQuota(looksLikeQuota);
       setCloudErrorMsg(
-        detail
-          ? `Could not publish to the live cloud database: ${detail}`
-          : 'Could not publish to the live cloud database. Please refresh the page, verify you are signed in with your Studio Owner account, and try again.'
+        looksLikeQuota
+          ? 'Publishing could not complete because your Firebase Firestore free daily quota limit has been reached (or the database timed out while throttled). Quota resets tomorrow, or you can upgrade the database immediately in Firebase Console.'
+          : detail
+            ? `Could not publish to the live cloud database: ${detail}`
+            : 'Could not publish to the live cloud database. Please refresh the page, verify you are signed in with your Studio Owner account, and try again.'
       );
     } finally {
       setIsPublishingLive(false);
       setPublishProgressMsg('');
       setPublishPercent(0);
     }
+  };
+
+  const handlePublishAllLive = async (customSuccessMsg?: string) => {
+    await runCloudPublish(
+      onProgress =>
+        publishAllStudioDataToCloud(
+          {
+            galleryPhotos,
+            featuredWeddings,
+            pricingPackages,
+            aboutContent,
+            faqs,
+            reviews,
+            blogPosts,
+            vaultContent,
+            vaultPhotos,
+          },
+          onProgress
+        ),
+      customSuccessMsg ||
+        `All changes published live! (${galleryPhotos.length} gallery photos, ${featuredWeddings.length} featured weddings, pricing & text synced)`
+    );
+  };
+
+  const handlePublishAboutTab = async () => {
+    if (aboutSubTab === 'page') {
+      await runCloudPublish(
+        onProgress =>
+          publishAboutPageOnlyToCloud(
+            { aboutContent, pricingPackages },
+            onProgress
+          ),
+        'About Us text & photo published live!'
+      );
+    } else {
+      await runCloudPublish(
+        onProgress =>
+          publishAboutSectionToCloud(
+            { aboutContent, faqs, reviews, blogPosts, pricingPackages },
+            onProgress
+          ),
+        'About Us, Reviews, Blog & FAQs published live!'
+      );
+    }
+  };
+
+  const handlePublishHomepageTab = async () => {
+    await runCloudPublish(
+      onProgress =>
+        publishAboutPageOnlyToCloud(
+          { aboutContent, pricingPackages },
+          onProgress
+        ),
+      'Homepage photos published live!'
+    );
+  };
+
+  const handlePublishPricingTab = async () => {
+    await runCloudPublish(
+      onProgress => publishPricingOnlyToCloud(pricingPackages, onProgress),
+      'Investment & Pricing packages published live!'
+    );
+  };
+
+  const handlePublishVaultTab = async () => {
+    await runCloudPublish(
+      onProgress =>
+        publishVaultSectionToCloud(
+          { vaultContent, vaultPhotos, pricingPackages },
+          onProgress
+        ),
+      'Guest Photo Vault changes published live!'
+    );
   };
 
   const handleFileUpload = async (
@@ -643,9 +723,22 @@ export default function PhotographerAdminModal({
 
         {/* Cloud Error Notice Banner */}
         {cloudErrorMsg && (
-          <div className="bg-red-50 border-b border-red-200 text-red-800 text-xs py-2.5 px-6 flex items-center gap-2 shrink-0">
-            <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
-            <span>{cloudErrorMsg}</span>
+          <div className="bg-red-50 border-b border-red-200 text-red-800 text-xs py-2.5 px-6 flex flex-wrap items-center justify-between gap-2 shrink-0">
+            <div className="flex items-start gap-2 min-w-0 flex-1">
+              <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+              <span>{cloudErrorMsg}</span>
+            </div>
+            {cloudErrorIsQuota && (
+              <a
+                href={FIREBASE_QUOTA_UPGRADE_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 bg-red-700 hover:bg-red-800 text-white px-3 py-1.5 rounded text-[11px] font-semibold uppercase tracking-wider shrink-0 transition-colors"
+              >
+                <span>Upgrade Firestore</span>
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            )}
           </div>
         )}
 
@@ -789,21 +882,30 @@ export default function PhotographerAdminModal({
                   </div>
 
                   <div className="flex-1 w-full space-y-3">
-                    <label className="inline-flex items-center gap-1.5 text-xs text-stone-800 hover:text-stone-950 border border-stone-300 px-3.5 py-2 rounded cursor-pointer hover:bg-stone-100 bg-white font-medium shadow-2xs">
-                      <Upload className="w-3.5 h-3.5 text-[#c2a378]" />
-                      <span>Upload new hero photo from computer</span>
-                      <input
-                        type="file"
-                        accept="image/*"
-                        className="hidden"
-                        onChange={e =>
-                          handleFileUpload(e, url => {
-                            onUpdateAboutContent({ homepageHeroImage: url });
-                            showSuccess('Homepage main photo updated!');
-                          })
-                        }
-                      />
-                    </label>
+                      <label className="inline-flex items-center gap-1.5 text-xs text-stone-800 hover:text-stone-950 border border-stone-300 px-3.5 py-2 rounded cursor-pointer hover:bg-stone-100 bg-white font-medium shadow-2xs">
+                        {isUploadingSingleImage ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c2a378]" />
+                        ) : (
+                          <Upload className="w-3.5 h-3.5 text-[#c2a378]" />
+                        )}
+                        <span>{isUploadingSingleImage ? 'Processing photo...' : 'Upload new hero photo from computer'}</span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          disabled={isUploadingSingleImage}
+                          className="hidden"
+                          onChange={e =>
+                            handleFileUpload(
+                              e,
+                              url => onUpdateAboutContent({ homepageHeroImage: url }),
+                              {
+                                maxChars: 140000,
+                                successMessage: 'Homepage main photo updated! Click "Publish Homepage Live" below to save live.',
+                              }
+                            )
+                          }
+                        />
+                      </label>
 
                     <div>
                       <label className="block text-[11px] font-semibold uppercase tracking-wider text-stone-600 mb-1">
@@ -864,17 +966,26 @@ export default function PhotographerAdminModal({
 
                   <div className="flex-1 w-full space-y-3">
                     <label className="inline-flex items-center gap-1.5 text-xs text-stone-800 hover:text-stone-950 border border-stone-300 px-3.5 py-2 rounded cursor-pointer hover:bg-stone-100 bg-white font-medium shadow-2xs">
-                      <Upload className="w-3.5 h-3.5 text-[#c2a378]" />
-                      <span>Upload new portrait from computer</span>
+                      {isUploadingSingleImage ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c2a378]" />
+                      ) : (
+                        <Upload className="w-3.5 h-3.5 text-[#c2a378]" />
+                      )}
+                      <span>{isUploadingSingleImage ? 'Processing photo...' : 'Upload new portrait from computer'}</span>
                       <input
                         type="file"
                         accept="image/*"
+                        disabled={isUploadingSingleImage}
                         className="hidden"
                         onChange={e =>
-                          handleFileUpload(e, url => {
-                            onUpdateAboutContent({ homepageImage: url });
-                            showSuccess('Homepage About portrait updated!');
-                          })
+                          handleFileUpload(
+                            e,
+                            url => onUpdateAboutContent({ homepageImage: url }),
+                            {
+                              maxChars: 140000,
+                              successMessage: 'Homepage About portrait updated! Click "Publish Homepage Live" below to save live.',
+                            }
+                          )
                         }
                       />
                     </label>
@@ -886,13 +997,13 @@ export default function PhotographerAdminModal({
                       <input
                         type="text"
                         value={
-                          aboutContent.homepageImage.startsWith('data:')
+                          (aboutContent.homepageImage || '').startsWith('data:')
                             ? ''
-                            : aboutContent.homepageImage
+                            : aboutContent.homepageImage || ''
                         }
                         onChange={e => onUpdateAboutContent({ homepageImage: e.target.value })}
                         placeholder={
-                          aboutContent.homepageImage.startsWith('data:')
+                          (aboutContent.homepageImage || '').startsWith('data:')
                             ? 'Uploaded photo active (paste new URL to replace)'
                             : 'Paste image URL...'
                         }
@@ -905,6 +1016,18 @@ export default function PhotographerAdminModal({
 
               <div className="p-4 bg-stone-50 border border-stone-200 rounded text-xs text-stone-600">
                 <strong className="text-stone-800">Tip — &ldquo;The Wedding Story&rdquo; Category Tiles:</strong> Each of the 5 category tiles on your homepage automatically displays the newest photo uploaded into that category inside <span className="font-semibold text-stone-800">Wedding Gallery Photos</span>.
+              </div>
+
+              <div className="pt-4 border-t border-stone-200 flex justify-end items-center text-xs">
+                <button
+                  type="button"
+                  onClick={() => void handlePublishHomepageTab()}
+                  disabled={isPublishingLive || isUploadingSingleImage}
+                  className="inline-flex items-center gap-1.5 bg-[#1e2321] text-white px-6 py-2.5 rounded text-xs uppercase tracking-widest font-sans font-semibold hover:bg-stone-800 transition-colors disabled:opacity-50"
+                >
+                  {isPublishingLive && <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c2a378]" />}
+                  <span>{isPublishingLive ? `Publishing (${publishPercent}%)` : 'Publish Homepage Live'}</span>
+                </button>
               </div>
             </div>
           )}
@@ -1627,10 +1750,12 @@ export default function PhotographerAdminModal({
 
                 <button
                   type="button"
-                  onClick={() => showSuccess('Pricing packages saved successfully!')}
-                  className="bg-[#1e2321] text-white px-6 py-2.5 rounded text-xs uppercase tracking-widest font-sans font-semibold hover:bg-stone-800 transition-colors"
+                  onClick={() => void handlePublishPricingTab()}
+                  disabled={isPublishingLive}
+                  className="inline-flex items-center gap-1.5 bg-[#1e2321] text-white px-6 py-2.5 rounded text-xs uppercase tracking-widest font-sans font-semibold hover:bg-stone-800 transition-colors disabled:opacity-50"
                 >
-                  Save Pricing
+                  {isPublishingLive && <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c2a378]" />}
+                  <span>{isPublishingLive ? `Publishing (${publishPercent}%)` : 'Save Pricing Live'}</span>
                 </button>
               </div>
             </div>
@@ -1799,9 +1924,9 @@ export default function PhotographerAdminModal({
                                   e,
                                   url => onUpdateAboutContent({ homepageImage: url }),
                                   {
-                                    maxChars: 175000,
+                                    maxChars: 140000,
                                     successMessage: isStudioAdmin
-                                      ? 'Homepage Photographer Portrait updated and syncing live!'
+                                      ? 'Homepage Photographer Portrait updated! Click "Save Changes" below to publish live.'
                                       : 'Homepage Photographer Portrait updated! Sign in above to publish live.',
                                   }
                                 )
@@ -1931,9 +2056,9 @@ export default function PhotographerAdminModal({
                                   e,
                                   url => onUpdateAboutContent({ storyImage: url }),
                                   {
-                                    maxChars: 175000,
+                                    maxChars: 140000,
                                     successMessage: isStudioAdmin
-                                      ? 'About Page Feature Image updated and syncing live!'
+                                      ? 'About Page Feature Image updated! Click "Save Changes" below to publish live.'
                                       : 'About Page Feature Image updated! Sign in above to publish live.',
                                   }
                                 )
@@ -2539,11 +2664,12 @@ export default function PhotographerAdminModal({
 
                 <button
                   type="button"
-                  onClick={() => void handlePublishAllLive('About Us changes published live!')}
-                  disabled={isPublishingLive}
-                  className="bg-[#1e2321] text-white px-6 py-2.5 rounded text-xs uppercase tracking-widest font-sans font-semibold hover:bg-stone-800 transition-colors disabled:opacity-50"
+                  onClick={() => void handlePublishAboutTab()}
+                  disabled={isPublishingLive || isUploadingSingleImage}
+                  className="inline-flex items-center gap-1.5 bg-[#1e2321] text-white px-6 py-2.5 rounded text-xs uppercase tracking-widest font-sans font-semibold hover:bg-stone-800 transition-colors disabled:opacity-50"
                 >
-                  {isPublishingLive ? 'Publishing...' : 'Save Changes'}
+                  {isPublishingLive && <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c2a378]" />}
+                  <span>{isPublishingLive ? `Publishing (${publishPercent}%)` : 'Save Changes'}</span>
                 </button>
               </div>
             </div>
@@ -3003,11 +3129,12 @@ export default function PhotographerAdminModal({
 
                 <button
                   type="button"
-                  onClick={() => void handlePublishAllLive('Guest Photo Vault changes published live!')}
+                  onClick={() => void handlePublishVaultTab()}
                   disabled={isPublishingLive}
-                  className="bg-[#1e2321] text-white px-6 py-2.5 rounded text-xs uppercase tracking-widest font-sans font-semibold hover:bg-stone-800 transition-colors disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 bg-[#1e2321] text-white px-6 py-2.5 rounded text-xs uppercase tracking-widest font-sans font-semibold hover:bg-stone-800 transition-colors disabled:opacity-50"
                 >
-                  {isPublishingLive ? 'Publishing...' : 'Save Changes'}
+                  {isPublishingLive && <Loader2 className="w-3.5 h-3.5 animate-spin text-[#c2a378]" />}
+                  <span>{isPublishingLive ? `Publishing (${publishPercent}%)` : 'Save Changes'}</span>
                 </button>
               </div>
             </div>
