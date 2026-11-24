@@ -8,9 +8,11 @@ export default function TopUtilityBar() {
       <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-2">
         <div className="flex items-center gap-4 sm:gap-6 text-[11px] sm:text-xs">
           <a
-            href="tel:07511616354"
+            href="https://wa.me/447511616354"
+            target="_blank"
+            rel="noopener noreferrer"
             className="flex items-center gap-1.5 hover:text-[#c2a378] transition-colors"
-            title="Call MMC Photography"
+            title="Message MMC Photography on WhatsApp"
           >
             <Phone className="w-3 h-3 text-[#c2a378]" />
             <span>07511616354</span>

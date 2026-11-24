@@ -279,7 +279,13 @@ export default function FooterNav({
           </div>
 
           <div className="flex items-center gap-4 text-[11px]">
-            <a href="tel:07511616354" className="hover:text-stone-200 flex items-center gap-1">
+            <a
+              href="https://wa.me/447511616354"
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Message MMC Photography on WhatsApp"
+              className="hover:text-stone-200 flex items-center gap-1"
+            >
               <Phone className="w-3 h-3 text-[#c2a378]" />
               <span>07511616354</span>
             </a>

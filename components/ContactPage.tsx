@@ -145,14 +145,17 @@ export default function ContactPage({ initialPackage }: ContactPageProps) {
 
               <div className="space-y-4 text-sm font-sans text-stone-700">
                 <a
-                  href="tel:07511616354"
+                  href="https://wa.me/447511616354"
+                  target="_blank"
+                  rel="noopener noreferrer"
                   className="flex items-center gap-3 hover:text-[#c2a378] transition-colors p-2 rounded hover:bg-stone-100/50"
+                  title="Message MMC Photography on WhatsApp"
                 >
                   <div className="w-9 h-9 rounded-full bg-[#1e2321] text-white flex items-center justify-center shrink-0">
                     <Phone className="w-4 h-4 text-[#c2a378]" />
                   </div>
                   <div>
-                    <div className="text-[11px] text-stone-400 uppercase tracking-wider">Call or WhatsApp</div>
+                    <div className="text-[11px] text-stone-400 uppercase tracking-wider">WhatsApp Us</div>
                     <div className="font-semibold text-stone-900">07511616354</div>
                   </div>
                 </a>
