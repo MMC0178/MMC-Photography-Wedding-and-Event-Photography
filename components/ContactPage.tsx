@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { Phone, Mail, Check, Send, Sparkles, Clock } from 'lucide-react';
+import { Phone, Mail, Check, Send, Sparkles, Clock, Facebook, Instagram } from 'lucide-react';
 
 interface ContactPageProps {
   initialPackage?: string;
@@ -172,6 +172,41 @@ export default function ContactPage({ initialPackage }: ContactPageProps) {
                     <div className="font-semibold text-stone-900">{STUDIO_EMAIL}</div>
                   </div>
                 </a>
+              </div>
+
+              <div className="pt-4 border-t border-stone-200 space-y-3">
+                <div className="text-[11px] text-stone-400 uppercase tracking-wider font-sans font-semibold">
+                  Follow Us
+                </div>
+                <div className="flex flex-wrap items-center gap-3 text-sm font-sans text-stone-700">
+                  <a
+                    href="https://www.facebook.com/MMCPhotographyNI/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-2.5 hover:text-[#c2a378] transition-colors py-1.5 px-2.5 rounded hover:bg-stone-100/70"
+                    aria-label="MMC Photography on Facebook"
+                    title="Follow MMC Photography on Facebook"
+                  >
+                    <div className="w-8 h-8 rounded-full bg-[#1e2321] text-white flex items-center justify-center shrink-0">
+                      <Facebook className="w-4 h-4 text-[#c2a378]" />
+                    </div>
+                    <span className="font-medium text-stone-900">Facebook</span>
+                  </a>
+
+                  <a
+                    href="https://www.instagram.com/mmcphotoni/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center gap-2.5 hover:text-[#c2a378] transition-colors py-1.5 px-2.5 rounded hover:bg-stone-100/70"
+                    aria-label="MMC Photography on Instagram"
+                    title="Follow MMC Photography on Instagram"
+                  >
+                    <div className="w-8 h-8 rounded-full bg-[#1e2321] text-white flex items-center justify-center shrink-0">
+                      <Instagram className="w-4 h-4 text-[#c2a378]" />
+                    </div>
+                    <span className="font-medium text-stone-900">Instagram</span>
+                  </a>
+                </div>
               </div>
 
               <div className="pt-4 border-t border-stone-200 space-y-2 text-xs font-serif text-stone-600">
