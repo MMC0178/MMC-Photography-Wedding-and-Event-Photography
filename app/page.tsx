@@ -26,6 +26,8 @@ import { useFeaturedWeddings } from '@/lib/featured-weddings-store';
 import { usePricing } from '@/lib/pricing-store';
 import { useAboutSection } from '@/lib/about-store';
 import { useGuestVault } from '@/lib/vault-store';
+import { GALLERY_CATEGORIES } from '@/lib/wedding-data';
+import { PAGE_SEO_MAP } from '@/lib/seo';
 
 export default function Home() {
   const [activePage, setActivePage] = useState<string>(() => {
@@ -115,6 +117,57 @@ export default function Home() {
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
+
+  // Dynamically update document title, meta description, social tags, and canonical URL per page
+  useEffect(() => {
+    const baseSeo = PAGE_SEO_MAP[activePage] || PAGE_SEO_MAP.home;
+    let title = baseSeo.title;
+    let description = baseSeo.description;
+
+    if (activePage === 'gallery' && activeCategory !== 'all') {
+      const cat = GALLERY_CATEGORIES.find(c => c.slug === activeCategory);
+      if (cat) {
+        title = `${cat.name} Wedding Gallery | MMC Photography`;
+        description = `${cat.description} Explore ${cat.name.toLowerCase()} wedding photography by MMC Photography.`;
+      }
+    }
+
+    document.title = title;
+
+    const setMeta = (selector: string, attr: 'name' | 'property', key: string, content: string) => {
+      let el = document.querySelector<HTMLMetaElement>(selector);
+      if (!el) {
+        el = document.createElement('meta');
+        el.setAttribute(attr, key);
+        document.head.appendChild(el);
+      }
+      el.setAttribute('content', content);
+    };
+
+    setMeta('meta[name="description"]', 'name', 'description', description);
+    setMeta('meta[property="og:title"]', 'property', 'og:title', title);
+    setMeta('meta[property="og:description"]', 'property', 'og:description', description);
+    setMeta('meta[name="twitter:title"]', 'name', 'twitter:title', title);
+    setMeta('meta[name="twitter:description"]', 'name', 'twitter:description', description);
+
+    const canonicalUrl = new URL(window.location.origin + window.location.pathname);
+    if (activePage !== 'home') {
+      canonicalUrl.searchParams.set('page', activePage);
+    }
+    if (activePage === 'gallery' && activeCategory !== 'all') {
+      canonicalUrl.searchParams.set('category', activeCategory);
+    }
+
+    setMeta('meta[property="og:url"]', 'property', 'og:url', canonicalUrl.toString());
+
+    let canonicalLink = document.querySelector<HTMLLinkElement>('link[rel="canonical"]');
+    if (!canonicalLink) {
+      canonicalLink = document.createElement('link');
+      canonicalLink.setAttribute('rel', 'canonical');
+      document.head.appendChild(canonicalLink);
+    }
+    canonicalLink.setAttribute('href', canonicalUrl.toString());
+  }, [activePage, activeCategory]);
 
   const handleNavigate = (page: string, category?: string) => {
     setActivePage(page);
