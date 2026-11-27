@@ -68,6 +68,9 @@ export const metadata: Metadata = {
     description: DEFAULT_SEO_DESCRIPTION,
     images: [ogHeroImage],
   },
+  verification: {
+    google: 'irwP8BULS6YWsIigHzgxqSNSQO5rint4Eoj2p7gdHUA',
+  },
 };
 
 const structuredData = {
