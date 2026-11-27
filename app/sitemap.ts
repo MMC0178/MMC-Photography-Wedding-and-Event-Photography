@@ -64,7 +64,7 @@ export default function sitemap(): MetadataRoute.Sitemap {
   ];
 
   const categoryPages: MetadataRoute.Sitemap = GALLERY_CATEGORIES.map(category => ({
-    url: `${siteUrl}/?page=gallery&category=${category.slug}`,
+    url: `${siteUrl}/?page=gallery&amp;category=${category.slug}`,
     lastModified,
     changeFrequency: 'weekly',
     priority: 0.7,
