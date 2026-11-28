@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import TopUtilityBar from '@/components/TopUtilityBar';
 import HeaderNav from '@/components/HeaderNav';
 import HeroSection from '@/components/HeroSection';
@@ -28,6 +28,7 @@ import { useAboutSection } from '@/lib/about-store';
 import { useGuestVault } from '@/lib/vault-store';
 import { GALLERY_CATEGORIES } from '@/lib/wedding-data';
 import { PAGE_SEO_MAP } from '@/lib/seo';
+import { trackEvent, trackPageView } from '@/lib/analytics';
 
 export default function Home() {
   const [activePage, setActivePage] = useState<string>(() => {
@@ -54,6 +55,7 @@ export default function Home() {
     }
     return false;
   });
+  const hasMountedPageRef = useRef(false);
 
   // Decoupled Stores
   const {
@@ -167,7 +169,16 @@ export default function Home() {
       document.head.appendChild(canonicalLink);
     }
     canonicalLink.setAttribute('href', canonicalUrl.toString());
-  }, [activePage, activeCategory]);
+
+    // Track SPA section transitions in GA4 (initial landing hit is already sent by gtag config)
+    if (hasMountedPageRef.current) {
+      if (!isAdminOpen) {
+        trackPageView(`${canonicalUrl.pathname}${canonicalUrl.search}`, title);
+      }
+    } else {
+      hasMountedPageRef.current = true;
+    }
+  }, [activePage, activeCategory, isAdminOpen]);
 
   const handleNavigate = (page: string, category?: string) => {
     setActivePage(page);
@@ -196,6 +207,10 @@ export default function Home() {
   };
 
   const handleSelectPackage = (pkgName: string) => {
+    trackEvent('select_item', {
+      item_list_name: 'Wedding Packages',
+      item_name: pkgName,
+    });
     setSelectedPackage(pkgName);
     handleNavigate('contact');
   };

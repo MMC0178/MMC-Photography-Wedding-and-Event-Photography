@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { Phone, Mail, Check, Send, Sparkles, Clock, Facebook, Instagram } from 'lucide-react';
+import { trackEvent } from '@/lib/analytics';
 
 interface ContactPageProps {
   initialPackage?: string;
@@ -46,6 +47,7 @@ export default function ContactPage({ initialPackage }: ContactPageProps) {
       }
 
       if (data.delivered) {
+        trackEvent('generate_lead', { method: 'contact_form' });
         setSubmittedCouple(couple);
         setSubmittedDate(date);
         setSubmitted(true);
@@ -80,6 +82,7 @@ export default function ContactPage({ initialPackage }: ContactPageProps) {
         const relayMessage = String(relayData.message || '');
 
         if (relayRes.ok && relaySuccess) {
+          trackEvent('generate_lead', { method: 'contact_form' });
           setSubmittedCouple(couple);
           setSubmittedDate(date);
           setSubmitted(true);
@@ -148,6 +151,7 @@ export default function ContactPage({ initialPackage }: ContactPageProps) {
                   href="https://wa.me/447511616354"
                   target="_blank"
                   rel="noopener noreferrer"
+                  onClick={() => trackEvent('whatsapp_click', { location: 'contact_page' })}
                   className="flex items-center gap-3 hover:text-[#c2a378] transition-colors p-2 rounded hover:bg-stone-100/50"
                   title="Message MMC Photography on WhatsApp"
                 >

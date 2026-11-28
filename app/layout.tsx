@@ -12,6 +12,7 @@ import {
   SOCIAL_PROFILES,
   getSiteUrl,
 } from '@/lib/seo';
+import GoogleAnalytics from '@/components/GoogleAnalytics';
 import './globals.css';
 
 const siteUrl = getSiteUrl();
@@ -155,6 +156,7 @@ export default function RootLayout({children}: {children: React.ReactNode}) {
         />
       </head>
       <body className="min-h-screen bg-white text-stone-800 selection:bg-[#c2a378]/20 selection:text-stone-900" suppressHydrationWarning>
+        <GoogleAnalytics />
         {children}
       </body>
     </html>
